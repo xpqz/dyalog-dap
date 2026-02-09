@@ -1,6 +1,10 @@
 package adapter
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/stefan/lsp-dap/internal/ride/protocol"
+)
 
 // Request is a minimal DAP request envelope used by the bootstrap server skeleton.
 type Request struct {
@@ -55,12 +59,27 @@ type Server struct {
 	rideController     RideCommandSender
 	activeTracerWindow int
 	activeTracerSet    bool
+	activeThreadID     int
+	activeThreadSet    bool
+	tracerWindows      map[int]tracerWindowState
 	pauseFallback      func() error
 }
 
 // RideCommandSender sends mapped control commands to RIDE.
 type RideCommandSender interface {
 	SendCommand(command string, args any) error
+}
+
+type tracerWindowState struct {
+	threadID int
+}
+
+// StoppedEventBody is emitted for DAP stopped events synthesized from RIDE lifecycle signals.
+type StoppedEventBody struct {
+	Reason            string `json:"reason"`
+	ThreadID          int    `json:"threadId"`
+	AllThreadsStopped bool   `json:"allThreadsStopped"`
+	Description       string `json:"description,omitempty"`
 }
 
 // NewServer creates a DAP server instance.
@@ -79,6 +98,7 @@ func NewServer() *Server {
 			SupportsExceptionInfoRequest:      false,
 			SupportsEvaluateForHovers:         false,
 		},
+		tracerWindows: map[int]tracerWindowState{},
 	}
 }
 
@@ -195,6 +215,234 @@ func (s *Server) sendWindowCommand(req Request, rideCommand string) Response {
 		return s.failure(req, "failed to send mapped RIDE control command")
 	}
 	return s.success(req)
+}
+
+// HandleRidePayload updates adapter runtime stop state from inbound RIDE events.
+func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if decoded.Kind != protocol.KindCommand {
+		return nil
+	}
+
+	switch decoded.Command {
+	case "OpenWindow":
+		window, ok := extractWindowContent(decoded.Args)
+		if !ok || !window.Debugger {
+			return nil
+		}
+
+		windowState := tracerWindowState{}
+		if prior, exists := s.tracerWindows[window.Token]; exists {
+			windowState = prior
+		}
+		if window.Tid > 0 {
+			windowState.threadID = window.Tid
+		}
+		s.tracerWindows[window.Token] = windowState
+		s.activeTracerWindow = window.Token
+		s.activeTracerSet = true
+		if windowState.threadID > 0 {
+			s.activeThreadID = windowState.threadID
+			s.activeThreadSet = true
+		}
+
+		return []Event{{
+			Event: "stopped",
+			Body:  s.newStoppedEventBody("entry", ""),
+		}}
+
+	case "SetHighlightLine":
+		highlight, ok := extractSetHighlightLine(decoded.Args)
+		if !ok {
+			return nil
+		}
+		if highlight.Win > 0 {
+			s.activeTracerWindow = highlight.Win
+			s.activeTracerSet = true
+		}
+
+		if threadID := s.threadForWindow(s.activeTracerWindow); threadID > 0 {
+			s.activeThreadID = threadID
+			s.activeThreadSet = true
+		}
+		return []Event{{
+			Event: "stopped",
+			Body:  s.newStoppedEventBody("step", ""),
+		}}
+
+	case "SetThread":
+		setThread, ok := extractSetThread(decoded.Args)
+		if !ok || setThread.Tid <= 0 {
+			return nil
+		}
+		s.activeThreadID = setThread.Tid
+		s.activeThreadSet = true
+		return nil
+
+	case "HadError":
+		hadError, _ := extractHadError(decoded.Args)
+		return []Event{{
+			Event: "stopped",
+			Body:  s.newStoppedEventBody("exception", hadError.ErrorText),
+		}}
+
+	default:
+		return nil
+	}
+}
+
+func (s *Server) newStoppedEventBody(reason, description string) StoppedEventBody {
+	return StoppedEventBody{
+		Reason:            reason,
+		ThreadID:          s.currentThreadID(),
+		AllThreadsStopped: false,
+		Description:       description,
+	}
+}
+
+func (s *Server) currentThreadID() int {
+	if s.activeThreadSet {
+		return s.activeThreadID
+	}
+	if s.activeTracerSet {
+		return s.threadForWindow(s.activeTracerWindow)
+	}
+	return 0
+}
+
+func (s *Server) threadForWindow(win int) int {
+	state, ok := s.tracerWindows[win]
+	if !ok {
+		return 0
+	}
+	return state.threadID
+}
+
+func extractWindowContent(args any) (protocol.WindowContentArgs, bool) {
+	switch v := args.(type) {
+	case protocol.WindowContentArgs:
+		return v, true
+	case map[string]any:
+		return protocol.WindowContentArgs{
+			Token:    intFromAny(v["token"]),
+			Debugger: boolFromAny(v["debugger"]),
+			Tid:      intFromAny(v["tid"]),
+		}, true
+	default:
+		return protocol.WindowContentArgs{}, false
+	}
+}
+
+func extractSetHighlightLine(args any) (protocol.SetHighlightLineArgs, bool) {
+	switch v := args.(type) {
+	case protocol.SetHighlightLineArgs:
+		return v, true
+	case map[string]any:
+		return protocol.SetHighlightLineArgs{
+			Win: intFromAny(v["win"]),
+		}, true
+	default:
+		return protocol.SetHighlightLineArgs{}, false
+	}
+}
+
+func extractSetThread(args any) (protocol.SetThreadArgs, bool) {
+	switch v := args.(type) {
+	case protocol.SetThreadArgs:
+		return v, true
+	case map[string]any:
+		return protocol.SetThreadArgs{
+			Tid: intFromAny(v["tid"]),
+		}, true
+	default:
+		return protocol.SetThreadArgs{}, false
+	}
+}
+
+func extractHadError(args any) (protocol.HadErrorArgs, bool) {
+	switch v := args.(type) {
+	case protocol.HadErrorArgs:
+		return v, true
+	case map[string]any:
+		return protocol.HadErrorArgs{
+			Error:     intFromAny(v["error"]),
+			ErrorText: stringFromAny(v["error_text"]),
+			DMX:       v["dmx"],
+		}, true
+	default:
+		return protocol.HadErrorArgs{}, false
+	}
+}
+
+func intFromAny(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int8:
+		return int(n)
+	case int16:
+		return int(n)
+	case int32:
+		return int(n)
+	case int64:
+		return int(n)
+	case uint:
+		return int(n)
+	case uint8:
+		return int(n)
+	case uint16:
+		return int(n)
+	case uint32:
+		return int(n)
+	case uint64:
+		return int(n)
+	case float32:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
+}
+
+func boolFromAny(v any) bool {
+	switch b := v.(type) {
+	case bool:
+		return b
+	case int:
+		return b == 1
+	case int8:
+		return b == 1
+	case int16:
+		return b == 1
+	case int32:
+		return b == 1
+	case int64:
+		return b == 1
+	case uint:
+		return b == 1
+	case uint8:
+		return b == 1
+	case uint16:
+		return b == 1
+	case uint32:
+		return b == 1
+	case uint64:
+		return b == 1
+	case float32:
+		return b == 1
+	case float64:
+		return b == 1
+	default:
+		return false
+	}
+}
+
+func stringFromAny(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 func (s *Server) success(req Request) Response {

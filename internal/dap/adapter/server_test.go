@@ -3,6 +3,8 @@ package adapter
 import (
 	"errors"
 	"testing"
+
+	"github.com/stefan/lsp-dap/internal/ride/protocol"
 )
 
 func TestHandleRequest_InitializeReturnsCapabilitiesAndInitializedEvent(t *testing.T) {
@@ -240,4 +242,141 @@ func (m *mockRideController) lastCall() rideCall {
 		return rideCall{}
 	}
 	return m.calls[len(m.calls)-1]
+}
+
+func TestHandleRidePayload_OpenWindowDebuggerEmitsStoppedAndUpdatesActiveWindow(t *testing.T) {
+	ride := &mockRideController{}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+
+	events := server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    99,
+			Debugger: true,
+			Tid:      3,
+		},
+	})
+
+	if len(events) != 1 || events[0].Event != "stopped" {
+		t.Fatalf("expected one stopped event, got %#v", events)
+	}
+	body, ok := events[0].Body.(StoppedEventBody)
+	if !ok {
+		t.Fatalf("expected StoppedEventBody, got %T", events[0].Body)
+	}
+	if body.Reason != "entry" {
+		t.Fatalf("expected reason=entry, got %q", body.Reason)
+	}
+	if body.ThreadID != 3 {
+		t.Fatalf("expected threadId=3, got %d", body.ThreadID)
+	}
+
+	resp, _ := server.HandleRequest(Request{Seq: 40, Command: "continue"})
+	if !resp.Success {
+		t.Fatalf("expected continue success, got %s", resp.Message)
+	}
+	if got := ride.lastCall().args["win"]; got != 99 {
+		t.Fatalf("expected active win=99, got %#v", got)
+	}
+}
+
+func TestHandleRidePayload_SetHighlightLineEmitsStepStoppedAndSelectsThread(t *testing.T) {
+	ride := &mockRideController{}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    10,
+			Debugger: true,
+			Tid:      1,
+		},
+	})
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    20,
+			Debugger: true,
+			Tid:      2,
+		},
+	})
+
+	events := server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "SetHighlightLine",
+		Args: protocol.SetHighlightLineArgs{
+			Win: 20,
+		},
+	})
+	if len(events) != 1 || events[0].Event != "stopped" {
+		t.Fatalf("expected one stopped event, got %#v", events)
+	}
+	body := events[0].Body.(StoppedEventBody)
+	if body.Reason != "step" {
+		t.Fatalf("expected reason=step, got %q", body.Reason)
+	}
+	if body.ThreadID != 2 {
+		t.Fatalf("expected threadId=2, got %d", body.ThreadID)
+	}
+
+	resp, _ := server.HandleRequest(Request{Seq: 41, Command: "next"})
+	if !resp.Success {
+		t.Fatalf("expected next success, got %s", resp.Message)
+	}
+	if got := ride.lastCall().args["win"]; got != 20 {
+		t.Fatalf("expected active win=20, got %#v", got)
+	}
+}
+
+func TestHandleRidePayload_HadErrorEmitsExceptionStopped(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "SetThread",
+		Args: protocol.SetThreadArgs{
+			Tid: 7,
+		},
+	})
+
+	events := server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "HadError",
+		Args:    protocol.HadErrorArgs{Error: 11, ErrorText: "DOMAIN ERROR"},
+	})
+	if len(events) != 1 || events[0].Event != "stopped" {
+		t.Fatalf("expected one stopped event, got %#v", events)
+	}
+	body := events[0].Body.(StoppedEventBody)
+	if body.Reason != "exception" {
+		t.Fatalf("expected reason=exception, got %q", body.Reason)
+	}
+	if body.ThreadID != 7 {
+		t.Fatalf("expected threadId=7, got %d", body.ThreadID)
+	}
+}
+
+func TestHandleRidePayload_OpenWindowNonDebuggerDoesNotEmitStopped(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	events := server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    5,
+			Debugger: false,
+		},
+	})
+	if len(events) != 0 {
+		t.Fatalf("expected no events, got %#v", events)
+	}
 }
