@@ -49,9 +49,18 @@ const (
 
 // Server is the DAP adapter entry point.
 type Server struct {
-	mu           sync.Mutex
-	state        serverState
-	capabilities Capabilities
+	mu                 sync.Mutex
+	state              serverState
+	capabilities       Capabilities
+	rideController     RideCommandSender
+	activeTracerWindow int
+	activeTracerSet    bool
+	pauseFallback      func() error
+}
+
+// RideCommandSender sends mapped control commands to RIDE.
+type RideCommandSender interface {
+	SendCommand(command string, args any) error
 }
 
 // NewServer creates a DAP server instance.
@@ -71,6 +80,28 @@ func NewServer() *Server {
 			SupportsEvaluateForHovers:         false,
 		},
 	}
+}
+
+// SetRideController injects a RIDE command sender used by DAP control requests.
+func (s *Server) SetRideController(controller RideCommandSender) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rideController = controller
+}
+
+// SetActiveTracerWindow sets the current tracer window id used for step/continue commands.
+func (s *Server) SetActiveTracerWindow(win int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activeTracerWindow = win
+	s.activeTracerSet = true
+}
+
+// SetPauseFallback registers an optional fallback hook when WeakInterrupt fails.
+func (s *Server) SetPauseFallback(fallback func() error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pauseFallback = fallback
 }
 
 // HandleRequest processes initialize/launch/attach/lifecycle skeleton requests.
@@ -114,9 +145,56 @@ func (s *Server) HandleRequest(req Request) (Response, []Event) {
 		s.state = stateTerminated
 		return s.success(req), nil
 
+	case "continue", "next", "stepIn", "stepOut", "pause":
+		return s.handleControlCommand(req), nil
+
 	default:
 		return s.failure(req, "unsupported command"), nil
 	}
+}
+
+func (s *Server) handleControlCommand(req Request) Response {
+	if s.state != stateAttachedOrLaunched {
+		return s.failure(req, "control command requires launch or attach")
+	}
+	if s.rideController == nil {
+		return s.failure(req, "no RIDE controller configured")
+	}
+
+	switch req.Command {
+	case "continue":
+		return s.sendWindowCommand(req, "Continue")
+	case "next":
+		return s.sendWindowCommand(req, "RunCurrentLine")
+	case "stepIn":
+		return s.sendWindowCommand(req, "StepInto")
+	case "stepOut":
+		return s.sendWindowCommand(req, "ContinueTrace")
+	case "pause":
+		if err := s.rideController.SendCommand("WeakInterrupt", map[string]any{}); err != nil {
+			if s.pauseFallback == nil {
+				return s.failure(req, "WeakInterrupt failed and no pause fallback configured")
+			}
+			if fallbackErr := s.pauseFallback(); fallbackErr != nil {
+				return s.failure(req, "WeakInterrupt and pause fallback failed")
+			}
+		}
+		return s.success(req)
+	default:
+		return s.failure(req, "unsupported command")
+	}
+}
+
+func (s *Server) sendWindowCommand(req Request, rideCommand string) Response {
+	if !s.activeTracerSet {
+		return s.failure(req, "no active tracer window")
+	}
+	if err := s.rideController.SendCommand(rideCommand, map[string]any{
+		"win": s.activeTracerWindow,
+	}); err != nil {
+		return s.failure(req, "failed to send mapped RIDE control command")
+	}
+	return s.success(req)
 }
 
 func (s *Server) success(req Request) Response {
