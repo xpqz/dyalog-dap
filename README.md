@@ -256,6 +256,21 @@ export DYALOG_RIDE_ADDR=127.0.0.1:4502
 go test ./cmd/dap-adapter -run '^TestLiveDAPAdapter_' -count=1 -v
 ```
 
+Interactive live E2E workflow (breakpoint/step/inspect/continue/disconnect automation against real adapter boundary):
+
+```bash
+export DYALOG_RIDE_ADDR=127.0.0.1:4502
+export DYALOG_E2E_REQUIRE=1
+# Optional: custom timeout for slow environments
+# export DYALOG_E2E_TIMEOUT=30s
+
+go test ./cmd/dap-adapter -run '^TestLiveDAPAdapter_InteractiveWorkflow$' -count=1 -v
+```
+
+Flake triage policy and artifact expectations:
+
+- `docs/validations/54-live-e2e-flake-policy.md`
+
 Connect-only mode (if Dyalog is already running):
 
 ```bash

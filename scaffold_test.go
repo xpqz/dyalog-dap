@@ -483,3 +483,50 @@ func TestScaffold_HasExtensionContractTestsAndGate(t *testing.T) {
 		t.Fatal("expected CI extension package job to run npm run test:contracts")
 	}
 }
+
+func TestScaffold_HasLiveInteractiveE2EAutomationAndFlakePolicy(t *testing.T) {
+	ci, err := os.ReadFile(".github/workflows/ci.yml")
+	if err != nil {
+		t.Fatalf("missing .github/workflows/ci.yml: %v", err)
+	}
+	ciText := string(ci)
+	requiredCISnippets := []string{
+		"DYALOG_E2E_REQUIRE",
+		"DYALOG_E2E_TIMEOUT",
+		"Upload live integration artifacts",
+		"artifacts/integration",
+		"TestLiveDAPAdapter_",
+	}
+	for _, snippet := range requiredCISnippets {
+		if !strings.Contains(ciText, snippet) {
+			t.Fatalf("expected live CI workflow snippet %q", snippet)
+		}
+	}
+
+	if _, err := os.Stat("cmd/dap-adapter/live_e2e_test.go"); err != nil {
+		t.Fatalf("missing cmd/dap-adapter/live_e2e_test.go: %v", err)
+	}
+	liveE2E, err := os.ReadFile("cmd/dap-adapter/live_e2e_test.go")
+	if err != nil {
+		t.Fatalf("read cmd/dap-adapter/live_e2e_test.go failed: %v", err)
+	}
+	if !strings.Contains(string(liveE2E), "TestLiveDAPAdapter_InteractiveWorkflow") {
+		t.Fatal("expected live E2E interactive workflow test in cmd/dap-adapter/live_e2e_test.go")
+	}
+
+	policy, err := os.ReadFile("docs/validations/54-live-e2e-flake-policy.md")
+	if err != nil {
+		t.Fatalf("missing docs/validations/54-live-e2e-flake-policy.md: %v", err)
+	}
+	policyText := string(policy)
+	requiredPolicySnippets := []string{
+		"infrastructure-flake",
+		"scenario-precondition",
+		"product-defect",
+	}
+	for _, snippet := range requiredPolicySnippets {
+		if !strings.Contains(policyText, snippet) {
+			t.Fatalf("expected flake policy to contain %q", snippet)
+		}
+	}
+}

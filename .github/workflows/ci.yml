@@ -78,6 +78,8 @@ jobs:
       DYALOG_RIDE_CONNECT_TIMEOUT: ${{ vars.DYALOG_RIDE_CONNECT_TIMEOUT }}
       DYALOG_BIN: ${{ vars.DYALOG_BIN }}
       DYALOG_LIVE_REQUIRE: "1"
+      DYALOG_E2E_REQUIRE: ${{ vars.DYALOG_E2E_REQUIRE }}
+      DYALOG_E2E_TIMEOUT: ${{ vars.DYALOG_E2E_TIMEOUT }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -87,3 +89,10 @@ jobs:
         run: |
           go test ./internal/integration/harness -run '^TestLiveDyalog_' -count=1 -v
           go test ./cmd/dap-adapter -run '^TestLiveDAPAdapter_' -count=1 -v
+      - name: Upload live integration artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-integration-artifacts
+          path: artifacts/integration
+          if-no-files-found: ignore
