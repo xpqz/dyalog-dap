@@ -167,6 +167,7 @@ For real interactive debugging UI, use a VS Code DAP client/extension setup that
 ## Live Dyalog Integration Harness
 
 The integration harness can connect to a live RIDE endpoint and write protocol transcripts as JSON Lines.
+When `DYALOG_RIDE_LAUNCH`/`DYALOG_BIN` is used, harness shutdown now uses process-group-aware termination on Unix (terminate, then kill fallback) to avoid orphaned Dyalog children.
 
 Environment variables:
 
@@ -219,6 +220,16 @@ go test ./... -count=1
 - Increase timeout: `export DYALOG_RIDE_CONNECT_TIMEOUT=30s`.
 - If startup is external, ensure interpreter launched with `RIDE_INIT=SERVE:*:<port>` and that `<port>` matches `DYALOG_RIDE_ADDR`.
 - If auto-launching, verify the executable path via `DYALOG_BIN` or explicit `DYALOG_RIDE_LAUNCH`.
+
+### Suspected orphaned Dyalog process after tests
+
+- Current harness cleanup terminates the launched process group on Unix to avoid lingering child interpreters.
+- If you still suspect leftovers from older runs, inspect and terminate manually:
+
+```bash
+pgrep -fl dyalog
+pkill -f dyalog
+```
 
 ### DAP `launch` or `attach` fails with missing ride address
 
