@@ -289,3 +289,83 @@ func TestScaffold_HasCIExtensionPackageJob(t *testing.T) {
 		}
 	}
 }
+
+func TestScaffold_HasExtensionVSIXPackagingScripts(t *testing.T) {
+	data, err := os.ReadFile("vscode-extension/package.json")
+	if err != nil {
+		t.Fatalf("missing vscode-extension/package.json: %v", err)
+	}
+	var pkg struct {
+		Scripts         map[string]string `json:"scripts"`
+		DevDependencies map[string]string `json:"devDependencies"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		t.Fatalf("vscode-extension/package.json is not valid JSON: %v", err)
+	}
+	requiredScripts := []string{"package:vsix", "check:manifest"}
+	for _, script := range requiredScripts {
+		if strings.TrimSpace(pkg.Scripts[script]) == "" {
+			t.Fatalf("expected vscode-extension package script %q", script)
+		}
+	}
+	if strings.TrimSpace(pkg.DevDependencies["@vscode/vsce"]) == "" {
+		t.Fatal("expected vscode-extension devDependency @vscode/vsce")
+	}
+}
+
+func TestScaffold_HasExtensionReleaseWorkflow(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/extension-release.yml")
+	if err != nil {
+		t.Fatalf("missing .github/workflows/extension-release.yml: %v", err)
+	}
+	text := string(data)
+	requiredSnippets := []string{
+		"name: extension-release",
+		"tags:",
+		"v*",
+		"working-directory: vscode-extension",
+		"npm run package:vsix",
+		"actions/upload-artifact",
+		".vsix",
+	}
+	for _, snippet := range requiredSnippets {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected extension release workflow to contain %q", snippet)
+		}
+	}
+}
+
+func TestScaffold_HasExtensionReleaseChecklistAndCompatibilityGuidance(t *testing.T) {
+	checklist, err := os.ReadFile("docs/releases/extension-vsix.md")
+	if err != nil {
+		t.Fatalf("missing docs/releases/extension-vsix.md: %v", err)
+	}
+	checklistText := string(checklist)
+	requiredChecklistSnippets := []string{
+		"# Extension VSIX Release Checklist",
+		"Marketplace",
+		"GitHub",
+		"adapter",
+	}
+	for _, snippet := range requiredChecklistSnippets {
+		if !strings.Contains(checklistText, snippet) {
+			t.Fatalf("expected extension checklist to contain %q", snippet)
+		}
+	}
+
+	extensionReadme, err := os.ReadFile("vscode-extension/README.md")
+	if err != nil {
+		t.Fatalf("missing vscode-extension/README.md: %v", err)
+	}
+	readmeText := string(extensionReadme)
+	requiredReadmeSnippets := []string{
+		"dap-adapter",
+		"DYALOG_DAP_ADAPTER_PATH",
+		"compatibility",
+	}
+	for _, snippet := range requiredReadmeSnippets {
+		if !strings.Contains(strings.ToLower(readmeText), strings.ToLower(snippet)) {
+			t.Fatalf("expected vscode-extension/README.md to contain %q", snippet)
+		}
+	}
+}

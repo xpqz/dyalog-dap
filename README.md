@@ -12,7 +12,7 @@ Current status (as of February 9, 2026):
 - Core phase-1 debug commands are wired: initialize, launch/attach, threads, stackTrace, scopes, variables, source, evaluate, continue/step/pause, setBreakpoints.
 - Live Dyalog smoke coverage is in CI and local tests.
 - A minimal VS Code debugger extension is included under `vscode-extension/` (debug type: `dyalog-dap`).
-- A published VSIX/Marketplace release is not yet shipped from this repository.
+- Automated VSIX packaging is available (local `npm run package:vsix` and tag-triggered GitHub Actions artifact build).
 
 Quick start right now:
 
@@ -127,7 +127,7 @@ DYALOG_RIDE_ADDR=127.0.0.1:4502 go run ./cmd/dap-adapter
 - Integration harness with protocol transcript artifacts
 - CI gating + VS Code smoke workflow scaffolding
 
-Current limitation: the repository has extension source and CI package checks, but no published Marketplace/VSIX release workflow is in active use yet.
+Current limitation: VSIX packaging is automated, but Marketplace publication still requires manual publisher credentials/approval.
 
 ## Day-to-Day Development
 
@@ -364,7 +364,7 @@ Workflow file: `.github/workflows/ci.yml`
 
 ## Known Limitations
 
-- No published VSIX/Marketplace package is included yet (extension source exists under `vscode-extension/`).
+- Marketplace publication is not automated yet; release checklist is documented in `docs/releases/extension-vsix.md`.
 - Some integration scenarios are fake-server deterministic flows
 - Live interpreter matrix coverage depends on environment availability
 - Prompt-mode semantics vary across interpreter/version combinations and are tracked as explicit open items

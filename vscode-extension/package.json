@@ -4,6 +4,11 @@
   "description": "Minimal VS Code debugger integration for the dyalog-dap adapter.",
   "version": "0.0.1",
   "publisher": "xpqz",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xpqz/dyalog-dap.git"
+  },
+  "license": "UNLICENSED",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -14,12 +19,21 @@
     "onDebug:dyalog-dap"
   ],
   "main": "./out/extension.js",
+  "files": [
+    "out/**/*",
+    "LICENSE.txt",
+    "README.md",
+    "package.json"
+  ],
   "scripts": {
     "build": "tsc -p .",
     "lint": "tsc -p . --noEmit",
-    "test": "npm run build && node --test out/test/*.test.js"
+    "test": "npm run build && node --test out/test/*.test.js",
+    "check:manifest": "npm run build && vsce ls",
+    "package:vsix": "npm run check:manifest && vsce package"
   },
   "devDependencies": {
+    "@vscode/vsce": "^3.6.1",
     "@types/node": "^20.17.0",
     "@types/vscode": "^1.85.0",
     "typescript": "^5.6.3"

@@ -1,0 +1,4 @@
+UNLICENSED
+
+This VS Code extension package is currently distributed without an open-source license grant.
+All rights are reserved unless and until a license is explicitly added by the repository owner.

@@ -35,6 +35,7 @@ go.work.sum
 .idea/
 vscode-extension/node_modules/
 vscode-extension/out/test/
+vscode-extension/*.vsix
 
 # Local reference implementations (not part of adapter source)
 reference/
