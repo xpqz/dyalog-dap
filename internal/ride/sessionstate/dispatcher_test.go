@@ -353,6 +353,110 @@ func TestDispatcher_SaveChangesWriteFailureDoesNotBlockCloseWindow(t *testing.T)
 	}
 }
 
+func TestDispatcher_HadErrorCancelsQueuedExecuteCommands(t *testing.T) {
+	transport := newMockTransport()
+	dispatcher := NewDispatcher(transport, protocol.NewCodec())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		dispatcher.Run(ctx)
+		close(done)
+	}()
+
+	transport.push(`["SetPromptType",{"type":0}]`)
+	waitForCondition(t, 250*time.Millisecond, func() bool {
+		promptType, known := dispatcher.PromptType()
+		return known && promptType == 0
+	})
+
+	if err := dispatcher.SendCommand("Execute", protocol.ExecuteArgs{Text: "cmd1\n", Trace: 0}); err != nil {
+		t.Fatalf("queue Execute cmd1 failed: %v", err)
+	}
+	if err := dispatcher.SendCommand("GetThreads", protocol.GetThreadsArgs{}); err != nil {
+		t.Fatalf("queue GetThreads failed: %v", err)
+	}
+	if err := dispatcher.SendCommand("Execute", protocol.ExecuteArgs{Text: "cmd2\n", Trace: 0}); err != nil {
+		t.Fatalf("queue Execute cmd2 failed: %v", err)
+	}
+
+	transport.push(`["HadError",{"error":11,"error_text":"DOMAIN ERROR"}]`)
+	transport.push(`["SetPromptType",{"type":1}]`)
+
+	write := waitForWrite(t, transport.writeCh, 250*time.Millisecond)
+	command, err := decodeCommandName(write)
+	if err != nil {
+		t.Fatalf("decodeCommandName failed: %v", err)
+	}
+	if command != "GetThreads" {
+		t.Fatalf("expected only non-Execute command to remain queued, got %q", command)
+	}
+
+	select {
+	case payload := <-transport.writeCh:
+		nextCommand, err := decodeCommandName(payload)
+		if err != nil {
+			t.Fatalf("decodeCommandName failed: %v", err)
+		}
+		t.Fatalf("expected no additional queued commands, got %q", nextCommand)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	transport.close()
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("dispatcher did not stop")
+	}
+}
+
+func TestDispatcher_DisconnectClearsQueuedCommands(t *testing.T) {
+	transport := newMockTransport()
+	dispatcher := NewDispatcher(transport, protocol.NewCodec())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		dispatcher.Run(ctx)
+		close(done)
+	}()
+
+	transport.push(`["SetPromptType",{"type":0}]`)
+	waitForCondition(t, 250*time.Millisecond, func() bool {
+		promptType, known := dispatcher.PromptType()
+		return known && promptType == 0
+	})
+
+	if err := dispatcher.SendCommand("Execute", protocol.ExecuteArgs{Text: "cmd1\n", Trace: 0}); err != nil {
+		t.Fatalf("queue Execute failed: %v", err)
+	}
+	if err := dispatcher.SendCommand("GetThreads", protocol.GetThreadsArgs{}); err != nil {
+		t.Fatalf("queue GetThreads failed: %v", err)
+	}
+
+	transport.push(`["Disconnect",{"message":"socket closed"}]`)
+	transport.push(`["SetPromptType",{"type":1}]`)
+
+	select {
+	case payload := <-transport.writeCh:
+		command, err := decodeCommandName(payload)
+		if err != nil {
+			t.Fatalf("decodeCommandName failed: %v", err)
+		}
+		t.Fatalf("expected queue to be cleared on Disconnect, got write %q", command)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	transport.close()
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("dispatcher did not stop")
+	}
+}
+
 func TestDispatcher_PublishDoesNotPanicWhenSubscriberChannelIsClosed(t *testing.T) {
 	dispatcher := NewDispatcher(newMockTransport(), protocol.NewCodec())
 	_, _ = dispatcher.Subscribe(1)

@@ -165,13 +165,19 @@ func (d *Dispatcher) isAllowedWhileBusy(command string) bool {
 }
 
 func (d *Dispatcher) handleInbound(decoded protocol.DecodedPayload) {
-	if decoded.Kind == protocol.KindCommand && decoded.Command == "SetPromptType" {
-		if promptType, ok := extractPromptType(decoded.Args); ok {
-			d.handlePromptType(promptType)
+	if decoded.Kind == protocol.KindCommand {
+		switch decoded.Command {
+		case "SetPromptType":
+			if promptType, ok := extractPromptType(decoded.Args); ok {
+				d.handlePromptType(promptType)
+			}
+		case "ReplySaveChanges":
+			d.handleReplySaveChanges(decoded.Args)
+		case "HadError":
+			d.cancelQueuedExecutes()
+		case "Disconnect", "SysError", "InternalError":
+			d.clearDeferredSends()
 		}
-	}
-	if decoded.Kind == protocol.KindCommand && decoded.Command == "ReplySaveChanges" {
-		d.handleReplySaveChanges(decoded.Args)
 	}
 	d.publish(decoded)
 }
@@ -265,6 +271,29 @@ func (d *Dispatcher) flushDeferredCloses(win int, deferred []outboundCommand) {
 			return
 		}
 	}
+}
+
+func (d *Dispatcher) cancelQueuedExecutes() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	filtered := d.queue[:0]
+	for _, cmd := range d.queue {
+		if cmd.name == "Execute" {
+			continue
+		}
+		filtered = append(filtered, cmd)
+	}
+	d.queue = filtered
+}
+
+func (d *Dispatcher) clearDeferredSends() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.queue = nil
+	d.pendingSaves = map[int]int{}
+	d.pendingCloses = map[int][]outboundCommand{}
 }
 
 func (d *Dispatcher) publish(decoded protocol.DecodedPayload) {
