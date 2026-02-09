@@ -369,3 +369,89 @@ func TestScaffold_HasExtensionReleaseChecklistAndCompatibilityGuidance(t *testin
 		}
 	}
 }
+
+func TestScaffold_HasExtensionSetupAndDiagnosticsCommands(t *testing.T) {
+	data, err := os.ReadFile("vscode-extension/package.json")
+	if err != nil {
+		t.Fatalf("missing vscode-extension/package.json: %v", err)
+	}
+
+	var pkg struct {
+		ActivationEvents []string `json:"activationEvents"`
+		Contributes      struct {
+			Commands []struct {
+				Command string `json:"command"`
+				Title   string `json:"title"`
+			} `json:"commands"`
+			Configuration struct {
+				Properties map[string]struct {
+					Type        string `json:"type"`
+					Default     bool   `json:"default"`
+					Description string `json:"description"`
+				} `json:"properties"`
+			} `json:"configuration"`
+		} `json:"contributes"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		t.Fatalf("vscode-extension/package.json is not valid JSON: %v", err)
+	}
+
+	requiredCommands := []string{
+		"dyalogDap.setupLaunchConfig",
+		"dyalogDap.validateAdapterPath",
+		"dyalogDap.validateRideAddr",
+		"dyalogDap.toggleDiagnosticsVerbose",
+	}
+	for _, commandID := range requiredCommands {
+		found := false
+		for _, command := range pkg.Contributes.Commands {
+			if command.Command == commandID && strings.TrimSpace(command.Title) != "" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected contributes.commands entry for %q", commandID)
+		}
+
+		activationEvent := "onCommand:" + commandID
+		eventFound := false
+		for _, event := range pkg.ActivationEvents {
+			if event == activationEvent {
+				eventFound = true
+				break
+			}
+		}
+		if !eventFound {
+			t.Fatalf("expected activation event %q", activationEvent)
+		}
+	}
+
+	verboseSetting := pkg.Contributes.Configuration.Properties["dyalogDap.diagnostics.verbose"]
+	if verboseSetting.Type != "boolean" {
+		t.Fatal("expected configuration property dyalogDap.diagnostics.verbose of type boolean")
+	}
+	if !strings.Contains(strings.ToLower(verboseSetting.Description), "diagnostic") {
+		t.Fatal("expected diagnostics verbosity setting description")
+	}
+}
+
+func TestScaffold_HasExtensionDiagnosticsOutputChannel(t *testing.T) {
+	data, err := os.ReadFile("vscode-extension/src/extension.ts")
+	if err != nil {
+		t.Fatalf("missing vscode-extension/src/extension.ts: %v", err)
+	}
+	text := string(data)
+	requiredSnippets := []string{
+		"createOutputChannel(\"Dyalog DAP\")",
+		"dyalogDap.setupLaunchConfig",
+		"dyalogDap.validateAdapterPath",
+		"dyalogDap.validateRideAddr",
+		"dyalogDap.toggleDiagnosticsVerbose",
+	}
+	for _, snippet := range requiredSnippets {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected extension source to contain %q", snippet)
+		}
+	}
+}

@@ -180,6 +180,8 @@ The repository includes a minimal VS Code extension at `vscode-extension/`:
 - debug type: `dyalog-dap`
 - contribution schema for `launch`/`attach`
 - adapter executable resolution (launch.json `adapterPath`, `DYALOG_DAP_ADAPTER_PATH`, workspace fallbacks)
+- guided commands for setup/validation (`Setup Launch Configuration`, `Validate Adapter Path`, `Validate RIDE Address`)
+- dedicated `Dyalog DAP` output channel with optional verbose diagnostics toggle
 
 Example debug configuration:
 

@@ -16,7 +16,11 @@
     "Debuggers"
   ],
   "activationEvents": [
-    "onDebug:dyalog-dap"
+    "onDebug:dyalog-dap",
+    "onCommand:dyalogDap.setupLaunchConfig",
+    "onCommand:dyalogDap.validateAdapterPath",
+    "onCommand:dyalogDap.validateRideAddr",
+    "onCommand:dyalogDap.toggleDiagnosticsVerbose"
   ],
   "main": "./out/extension.js",
   "files": [
@@ -39,6 +43,34 @@
     "typescript": "^5.6.3"
   },
   "contributes": {
+    "commands": [
+      {
+        "command": "dyalogDap.setupLaunchConfig",
+        "title": "Dyalog DAP: Setup Launch Configuration"
+      },
+      {
+        "command": "dyalogDap.validateAdapterPath",
+        "title": "Dyalog DAP: Validate Adapter Path"
+      },
+      {
+        "command": "dyalogDap.validateRideAddr",
+        "title": "Dyalog DAP: Validate RIDE Address"
+      },
+      {
+        "command": "dyalogDap.toggleDiagnosticsVerbose",
+        "title": "Dyalog DAP: Toggle Verbose Diagnostics"
+      }
+    ],
+    "configuration": {
+      "title": "Dyalog DAP",
+      "properties": {
+        "dyalogDap.diagnostics.verbose": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable verbose diagnostic logging in the Dyalog DAP output channel."
+        }
+      }
+    },
     "debuggers": [
       {
         "type": "dyalog-dap",
