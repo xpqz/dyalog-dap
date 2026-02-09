@@ -425,6 +425,296 @@ func TestIntegration_TracerLifecycleAndSteppingControls(t *testing.T) {
 	}
 }
 
+func TestIntegration_SetBreakpointsSendsSetLineAttributes(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+
+		if err := runHandshake(conn); err != nil {
+			serverErr <- err
+			return
+		}
+		if err := writeFrame(conn, `["OpenWindow",{"token":1001,"debugger":0,"tid":3,"filename":"/ws/src/bp.apl"}]`); err != nil {
+			serverErr <- err
+			return
+		}
+
+		payload, err := readFrame(conn)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		command, err := decodeCommandName(payload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if command != "SetLineAttributes" {
+			serverErr <- fmt.Errorf("expected SetLineAttributes, got %q", command)
+			return
+		}
+		win, err := decodeCommandWin(payload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if win != 1001 {
+			serverErr <- fmt.Errorf("expected win=1001, got %d", win)
+			return
+		}
+		stop, err := decodeCommandStop(payload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if len(stop) != 2 || stop[0] != 2 || stop[1] != 7 {
+			serverErr <- fmt.Errorf("expected stop=[2 7], got %#v", stop)
+			return
+		}
+
+		serverErr <- nil
+	}()
+
+	h := New(Config{
+		RideAddr:       ln.Addr().String(),
+		ConnectTimeout: 2 * time.Second,
+		TranscriptDir:  t.TempDir(),
+	})
+	client, err := h.Start(context.Background(), t.Name())
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer h.Close()
+
+	dispatcher := sessionstate.NewDispatcher(client, protocol.NewCodec())
+	dispatcherEvents, _ := dispatcher.Subscribe(32)
+
+	dispatcherCtx, cancelDispatcher := context.WithCancel(context.Background())
+	defer cancelDispatcher()
+	dispatcherDone := make(chan struct{})
+	go func() {
+		dispatcher.Run(dispatcherCtx)
+		close(dispatcherDone)
+	}()
+
+	adapter := dapadapter.NewServer()
+	adapter.SetRideController(dispatcher)
+	if resp, _ := adapter.HandleRequest(dapadapter.Request{Seq: 1, Command: "initialize"}); !resp.Success {
+		t.Fatalf("adapter initialize failed: %s", resp.Message)
+	}
+	if resp, _ := adapter.HandleRequest(dapadapter.Request{Seq: 2, Command: "launch"}); !resp.Success {
+		t.Fatalf("adapter launch failed: %s", resp.Message)
+	}
+
+	openSeen := make(chan struct{})
+	bridgeDone := make(chan struct{})
+	go func() {
+		defer close(bridgeDone)
+		for {
+			select {
+			case event := <-dispatcherEvents:
+				_ = adapter.HandleRidePayload(event)
+				if event.Command == "OpenWindow" {
+					select {
+					case <-openSeen:
+					default:
+						close(openSeen)
+					}
+				}
+			case <-dispatcherCtx.Done():
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-openSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for OpenWindow mapping")
+	}
+
+	resp, _ := adapter.HandleRequest(dapadapter.Request{
+		Seq:     3,
+		Command: "setBreakpoints",
+		Arguments: map[string]any{
+			"source": map[string]any{
+				"path": "/ws/src/bp.apl",
+			},
+			"breakpoints": []any{
+				map[string]any{"line": 3},
+				map[string]any{"line": 8},
+			},
+		},
+	})
+	if !resp.Success {
+		t.Fatalf("setBreakpoints failed: %s", resp.Message)
+	}
+
+	cancelDispatcher()
+	select {
+	case <-dispatcherDone:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("dispatcher did not stop")
+	}
+	select {
+	case <-bridgeDone:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("bridge did not stop")
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("fake server assertions failed: %v", err)
+	}
+}
+
+func TestIntegration_SaveReplyCloseOrdering(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+
+		if err := runHandshake(conn); err != nil {
+			serverErr <- err
+			return
+		}
+		if err := writeFrame(conn, `["SetPromptType",{"type":0}]`); err != nil {
+			serverErr <- err
+			return
+		}
+
+		savePayload, err := readFrame(conn)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if command, _ := decodeCommandName(savePayload); command != "SaveChanges" {
+			serverErr <- fmt.Errorf("expected SaveChanges first, got %q", command)
+			return
+		}
+
+		if err := conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
+			serverErr <- err
+			return
+		}
+		if unexpectedPayload, err := readFrame(conn); err == nil {
+			unexpectedCommand, _ := decodeCommandName(unexpectedPayload)
+			serverErr <- fmt.Errorf("expected no command before ReplySaveChanges, got %q", unexpectedCommand)
+			return
+		} else {
+			var netErr net.Error
+			if !errors.As(err, &netErr) || !netErr.Timeout() {
+				serverErr <- err
+				return
+			}
+		}
+		_ = conn.SetReadDeadline(time.Time{})
+
+		if err := writeFrame(conn, `["ReplySaveChanges",{"win":5,"err":0}]`); err != nil {
+			serverErr <- err
+			return
+		}
+
+		closePayload, err := readFrame(conn)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		closeCommand, err := decodeCommandName(closePayload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if closeCommand != "CloseWindow" {
+			serverErr <- fmt.Errorf("expected CloseWindow after ReplySaveChanges, got %q", closeCommand)
+			return
+		}
+		closeWin, err := decodeCommandWin(closePayload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if closeWin != 5 {
+			serverErr <- fmt.Errorf("expected CloseWindow win=5, got %d", closeWin)
+			return
+		}
+
+		serverErr <- nil
+	}()
+
+	h := New(Config{
+		RideAddr:       ln.Addr().String(),
+		ConnectTimeout: 2 * time.Second,
+		TranscriptDir:  t.TempDir(),
+	})
+	client, err := h.Start(context.Background(), t.Name())
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer h.Close()
+
+	dispatcher := sessionstate.NewDispatcher(client, protocol.NewCodec())
+	dispatcherCtx, cancelDispatcher := context.WithCancel(context.Background())
+	defer cancelDispatcher()
+	dispatcherDone := make(chan struct{})
+	go func() {
+		dispatcher.Run(dispatcherCtx)
+		close(dispatcherDone)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		promptType, known := dispatcher.PromptType()
+		if known && promptType == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for promptType=0")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := dispatcher.SendCommand("SaveChanges", protocol.SaveChangesArgs{
+		Win:  5,
+		Text: []string{"a←1"},
+	}); err != nil {
+		t.Fatalf("SendCommand SaveChanges failed: %v", err)
+	}
+	if err := dispatcher.SendCommand("CloseWindow", protocol.WindowArgs{Win: 5}); err != nil {
+		t.Fatalf("SendCommand CloseWindow failed: %v", err)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("fake server assertions failed: %v", err)
+	}
+
+	cancelDispatcher()
+	select {
+	case <-dispatcherDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("dispatcher did not stop")
+	}
+}
+
 func runHandshake(conn net.Conn) error {
 	if err := writeFrame(conn, "SupportedProtocols=2"); err != nil {
 		return err
@@ -506,6 +796,37 @@ func decodeCommandWin(payload string) (int, error) {
 		return 0, errors.New("command win is not numeric")
 	}
 	return int(win), nil
+}
+
+func decodeCommandStop(payload string) ([]int, error) {
+	var arr []json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &arr); err != nil {
+		return nil, err
+	}
+	if len(arr) < 2 {
+		return nil, errors.New("command payload missing args")
+	}
+	var args map[string]any
+	if err := json.Unmarshal(arr[1], &args); err != nil {
+		return nil, err
+	}
+	rawStop, ok := args["stop"]
+	if !ok {
+		return nil, errors.New("command args missing stop")
+	}
+	items, ok := rawStop.([]any)
+	if !ok {
+		return nil, errors.New("stop is not an array")
+	}
+	stop := make([]int, 0, len(items))
+	for _, item := range items {
+		value, ok := item.(float64)
+		if !ok {
+			return nil, errors.New("stop contains non-numeric value")
+		}
+		stop = append(stop, int(value))
+	}
+	return stop, nil
 }
 
 func writeFrame(w io.Writer, payload string) error {
