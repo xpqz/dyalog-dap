@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	dapadapter "github.com/stefan/lsp-dap/internal/dap/adapter"
@@ -96,5 +97,26 @@ func TestScaffold_HasVSCodeSmokeTasks(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected VS Code task 'build dap-adapter'")
+	}
+}
+
+func TestScaffold_HasCIWorkflowWithCriticalAndLiveJobs(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/ci.yml")
+	if err != nil {
+		t.Fatalf("missing .github/workflows/ci.yml: %v", err)
+	}
+	text := string(data)
+
+	requiredSnippets := []string{
+		"name: ci",
+		"critical-gate:",
+		"live-dyalog:",
+		"DYALOG_RIDE_ADDR",
+		"go test ./...",
+	}
+	for _, snippet := range requiredSnippets {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected CI workflow to contain %q", snippet)
+		}
 	}
 }

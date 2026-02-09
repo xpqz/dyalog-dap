@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  critical-gate:
+    name: critical-gate (go ${{ matrix.go-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ["1.22.x", "1.23.x"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: Run critical protocol/adapter suites
+        run: |
+          go test ./internal/ride/protocol ./internal/ride/sessionstate ./internal/dap/adapter ./internal/integration/harness -count=1
+
+  full-suite:
+    name: full-suite
+    runs-on: ubuntu-latest
+    needs: critical-gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+      - name: Run full test suite
+        run: go test ./... -count=1
+      - name: Run vet
+        run: go vet ./...
+
+  live-dyalog:
+    name: live-dyalog (optional)
+    runs-on: ubuntu-latest
+    needs: critical-gate
+    if: ${{ vars.DYALOG_RIDE_ADDR != '' }}
+    env:
+      DYALOG_RIDE_ADDR: ${{ vars.DYALOG_RIDE_ADDR }}
+      DYALOG_RIDE_LAUNCH: ${{ vars.DYALOG_RIDE_LAUNCH }}
+      DYALOG_RIDE_CONNECT_TIMEOUT: ${{ vars.DYALOG_RIDE_CONNECT_TIMEOUT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+      - name: Run live harness smoke (when endpoint is configured)
+        run: go test ./internal/integration/harness -count=1
