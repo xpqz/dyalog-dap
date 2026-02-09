@@ -832,16 +832,19 @@ func (s *Server) handleSourceRequest(req Request) Response {
 		return s.failure(req, "source requires a mapped sourceReference or path")
 	}
 
-	if lines, ok := s.sourceTextByPath[path]; ok {
-		return s.successWithBody(req, SourceResponseBody{
-			Content:  strings.Join(lines, "\n"),
-			MimeType: "text/plain",
-		})
+	if s.hasActiveTokenForPath(path) {
+		if lines, ok := s.sourceTextByPath[path]; ok {
+			return s.successWithBody(req, SourceResponseBody{
+				Content:  strings.Join(lines, "\n"),
+				MimeType: "text/plain",
+			})
+		}
+		return s.failure(req, fmt.Sprintf("source mapped to active window but no in-memory text for path: %s", path))
 	}
 
 	bytes, err := os.ReadFile(path)
 	if err != nil {
-		return s.failure(req, "source content is unavailable")
+		return s.failure(req, fmt.Sprintf("source content is unavailable for path %s: %v", path, err))
 	}
 	return s.successWithBody(req, SourceResponseBody{
 		Content:  string(bytes),
@@ -1076,7 +1079,9 @@ func (s *Server) bindTokenToSource(token int, path, displayName string) {
 	if token <= 0 || path == "" {
 		return
 	}
+	previousPath := ""
 	if existing, ok := s.sourceByToken[token]; ok {
+		previousPath = existing.path
 		if mappedToken, ok := s.tokenBySourceRef[existing.sourceRef]; ok && mappedToken == token {
 			delete(s.tokenBySourceRef, existing.sourceRef)
 		}
@@ -1100,6 +1105,10 @@ func (s *Server) bindTokenToSource(token int, path, displayName string) {
 		delete(s.sourceByToken, existingToken)
 	}
 	s.tokenBySourceRef[sourceRef] = token
+
+	if previousPath != "" && previousPath != path && !s.hasActiveTokenForPath(previousPath) {
+		delete(s.sourceTextByPath, previousPath)
+	}
 }
 
 func (s *Server) unbindToken(token int) {
@@ -1107,10 +1116,14 @@ func (s *Server) unbindToken(token int) {
 		return
 	}
 	if binding, ok := s.sourceByToken[token]; ok {
+		closedPath := binding.path
 		if mappedToken, mapped := s.tokenBySourceRef[binding.sourceRef]; mapped && mappedToken == token {
 			delete(s.tokenBySourceRef, binding.sourceRef)
 		}
 		delete(s.sourceByToken, token)
+		if closedPath != "" && !s.hasActiveTokenForPath(closedPath) {
+			delete(s.sourceTextByPath, closedPath)
+		}
 	}
 
 	if _, ok := s.tracerWindows[token]; ok {
@@ -1126,6 +1139,25 @@ func (s *Server) unbindToken(token int) {
 			s.activeTracerSet = false
 		}
 	}
+}
+
+func (s *Server) hasActiveTokenForPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	sourceRef, ok := s.sourceRefByPath[path]
+	if !ok {
+		return false
+	}
+	token, ok := s.tokenBySourceRef[sourceRef]
+	if !ok {
+		return false
+	}
+	binding, ok := s.sourceByToken[token]
+	if !ok {
+		return false
+	}
+	return binding.path == path
 }
 
 func (s *Server) updateTracerWindow(window protocol.WindowContentArgs) {

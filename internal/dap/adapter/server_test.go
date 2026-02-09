@@ -2,6 +2,8 @@ package adapter
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1740,6 +1742,165 @@ func TestHandleRequest_SourceReturnsMappedWindowText(t *testing.T) {
 	}
 }
 
+func TestHandleRequest_SourcePrefersActiveWindowTextOverDisk(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	sourcePath := filepath.Join(t.TempDir(), "active.apl")
+	if err := os.WriteFile(sourcePath, []byte("disk-version"), 0o600); err != nil {
+		t.Fatalf("write disk source: %v", err)
+	}
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    902,
+			Filename: sourcePath,
+			Text:     []string{"window-version"},
+		},
+	})
+	sourceRef, ok := server.ResolveSourceReferenceForToken(902)
+	if !ok {
+		t.Fatal("expected source reference mapping for token")
+	}
+
+	resp, _ := server.HandleRequest(Request{
+		Seq:     85,
+		Command: "source",
+		Arguments: map[string]any{
+			"sourceReference": sourceRef,
+		},
+	})
+	if !resp.Success {
+		t.Fatalf("expected source success, got %s", resp.Message)
+	}
+	body := resp.Body.(SourceResponseBody)
+	if body.Content != "window-version" {
+		t.Fatalf("expected active window text precedence, got %#v", body)
+	}
+}
+
+func TestHandleRequest_SourceFallsBackToDiskAfterCloseWindow(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	sourcePath := filepath.Join(t.TempDir(), "closed.apl")
+	if err := os.WriteFile(sourcePath, []byte("disk-after-close"), 0o600); err != nil {
+		t.Fatalf("write disk source: %v", err)
+	}
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    903,
+			Filename: sourcePath,
+			Text:     []string{"window-before-close"},
+		},
+	})
+	sourceRef, ok := server.ResolveSourceReferenceForToken(903)
+	if !ok {
+		t.Fatal("expected source reference for token")
+	}
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "CloseWindow",
+		Args: protocol.WindowArgs{
+			Win: 903,
+		},
+	})
+
+	resp, _ := server.HandleRequest(Request{
+		Seq:     86,
+		Command: "source",
+		Arguments: map[string]any{
+			"sourceReference": sourceRef,
+		},
+	})
+	if !resp.Success {
+		t.Fatalf("expected source success from disk fallback, got %s", resp.Message)
+	}
+	body := resp.Body.(SourceResponseBody)
+	if body.Content != "disk-after-close" {
+		t.Fatalf("expected disk content after close invalidation, got %#v", body)
+	}
+}
+
+func TestHandleRequest_SourceMappingChurnDoesNotCrossBindOldReferenceContent(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	tempDir := t.TempDir()
+	oldPath := filepath.Join(tempDir, "old.apl")
+	newPath := filepath.Join(tempDir, "new.apl")
+	if err := os.WriteFile(oldPath, []byte("old-disk"), 0o600); err != nil {
+		t.Fatalf("write old source: %v", err)
+	}
+	if err := os.WriteFile(newPath, []byte("new-disk"), 0o600); err != nil {
+		t.Fatalf("write new source: %v", err)
+	}
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    904,
+			Filename: oldPath,
+			Text:     []string{"old-window"},
+		},
+	})
+	oldRef, ok := server.ResolveSourceReferenceForToken(904)
+	if !ok {
+		t.Fatal("expected old source ref")
+	}
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "UpdateWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    904,
+			Filename: newPath,
+			Text:     []string{"new-window"},
+		},
+	})
+	newRef, ok := server.ResolveSourceReferenceForToken(904)
+	if !ok {
+		t.Fatal("expected new source ref after update")
+	}
+	if newRef == oldRef {
+		t.Fatalf("expected different source refs after path churn: %d", newRef)
+	}
+
+	newResp, _ := server.HandleRequest(Request{
+		Seq:     87,
+		Command: "source",
+		Arguments: map[string]any{
+			"sourceReference": newRef,
+		},
+	})
+	if !newResp.Success {
+		t.Fatalf("expected source success for new ref, got %s", newResp.Message)
+	}
+	if body := newResp.Body.(SourceResponseBody); body.Content != "new-window" {
+		t.Fatalf("expected new ref to return new window text, got %#v", body)
+	}
+
+	oldResp, _ := server.HandleRequest(Request{
+		Seq:     88,
+		Command: "source",
+		Arguments: map[string]any{
+			"sourceReference": oldRef,
+		},
+	})
+	if !oldResp.Success {
+		t.Fatalf("expected old source ref to resolve from disk, got %s", oldResp.Message)
+	}
+	if body := oldResp.Body.(SourceResponseBody); body.Content != "old-disk" {
+		t.Fatalf("expected old ref to avoid cross-bound text, got %#v", body)
+	}
+}
+
 func TestHandleRequest_SourceWithoutMappingFails(t *testing.T) {
 	server := NewServer()
 	enterRunningState(t, server)
@@ -1753,6 +1914,47 @@ func TestHandleRequest_SourceWithoutMappingFails(t *testing.T) {
 	})
 	if resp.Success {
 		t.Fatal("expected missing source mapping to fail")
+	}
+}
+
+func TestHandleRequest_SourceFailureIncludesPathDiagnostic(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	sourcePath := filepath.Join(t.TempDir(), "missing.apl")
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    906,
+			Filename: sourcePath,
+			Text:     []string{"transient"},
+		},
+	})
+	sourceRef, ok := server.ResolveSourceReferenceForToken(906)
+	if !ok {
+		t.Fatal("expected source reference")
+	}
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "CloseWindow",
+		Args: protocol.WindowArgs{
+			Win: 906,
+		},
+	})
+
+	resp, _ := server.HandleRequest(Request{
+		Seq:     89,
+		Command: "source",
+		Arguments: map[string]any{
+			"sourceReference": sourceRef,
+		},
+	})
+	if resp.Success {
+		t.Fatal("expected missing disk source to fail after close")
+	}
+	if !strings.Contains(resp.Message, sourcePath) {
+		t.Fatalf("expected source failure message to include path, got %q", resp.Message)
 	}
 }
 
