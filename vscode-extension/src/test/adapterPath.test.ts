@@ -38,3 +38,23 @@ test("resolveAdapterPath falls back to env then workspace candidates", () => {
   );
   assert.equal(actual, "/opt/dap-adapter");
 });
+
+test("resolveAdapterPath uses platform-specific executable fallback", () => {
+  const windows = resolveAdapterPath(
+    {},
+    { uri: { fsPath: "C:/ws" } } as any,
+    {},
+    (candidate) => candidate === "C:/ws/dap-adapter.exe",
+    "win32"
+  );
+  assert.equal(windows, "C:/ws/dap-adapter.exe");
+
+  const linux = resolveAdapterPath(
+    {},
+    { uri: { fsPath: "/tmp/ws" } } as any,
+    {},
+    (candidate) => candidate === "/tmp/ws/dap-adapter",
+    "linux"
+  );
+  assert.equal(linux, "/tmp/ws/dap-adapter");
+});

@@ -1,17 +1,22 @@
 import fs from "fs";
 import path from "path";
-import * as vscode from "vscode";
 
 type UnknownRecord = Record<string, unknown>;
+export type WorkspaceFolderLike = {
+  uri?: {
+    fsPath?: string;
+  };
+};
 
 export function resolveAdapterPath(
   config: UnknownRecord,
-  workspaceFolder: vscode.WorkspaceFolder | undefined,
+  workspaceFolder: WorkspaceFolderLike | undefined,
   env: NodeJS.ProcessEnv = process.env,
-  fileExists: (candidate: string) => boolean = fs.existsSync
+  fileExists: (candidate: string) => boolean = fs.existsSync,
+  platform: NodeJS.Platform = process.platform
 ): string {
   const candidates: string[] = [];
-  const windows = process.platform === "win32";
+  const windows = platform === "win32";
   const executableName = windows ? "dap-adapter.exe" : "dap-adapter";
   const workspacePath = workspaceFolder?.uri?.fsPath ?? "";
 

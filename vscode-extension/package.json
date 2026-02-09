@@ -33,6 +33,7 @@
     "build": "tsc -p .",
     "lint": "tsc -p . --noEmit",
     "test": "npm run build && node --test out/test/*.test.js",
+    "test:contracts": "npm run build && node --test out/test/contracts.test.js",
     "check:manifest": "npm run build && vsce ls",
     "package:vsix": "npm run check:manifest && vsce package"
   },

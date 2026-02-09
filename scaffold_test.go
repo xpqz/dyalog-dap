@@ -455,3 +455,31 @@ func TestScaffold_HasExtensionDiagnosticsOutputChannel(t *testing.T) {
 		}
 	}
 }
+
+func TestScaffold_HasExtensionContractTestsAndGate(t *testing.T) {
+	data, err := os.ReadFile("vscode-extension/package.json")
+	if err != nil {
+		t.Fatalf("missing vscode-extension/package.json: %v", err)
+	}
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		t.Fatalf("vscode-extension/package.json is not valid JSON: %v", err)
+	}
+	if strings.TrimSpace(pkg.Scripts["test:contracts"]) == "" {
+		t.Fatal("expected vscode-extension package script test:contracts")
+	}
+
+	if _, err := os.Stat("vscode-extension/src/test/contracts.test.ts"); err != nil {
+		t.Fatalf("missing vscode-extension/src/test/contracts.test.ts: %v", err)
+	}
+
+	ci, err := os.ReadFile(".github/workflows/ci.yml")
+	if err != nil {
+		t.Fatalf("missing .github/workflows/ci.yml: %v", err)
+	}
+	if !strings.Contains(string(ci), "npm run test:contracts") {
+		t.Fatal("expected CI extension package job to run npm run test:contracts")
+	}
+}

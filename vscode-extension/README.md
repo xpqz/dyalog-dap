@@ -26,6 +26,7 @@ Use verbose diagnostics when you need deeper startup/runtime traces without tele
 cd vscode-extension
 npm ci
 npm run lint
+npm run test:contracts
 npm run test
 npm run build
 ```

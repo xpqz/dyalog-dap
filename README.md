@@ -204,6 +204,7 @@ To try it quickly:
 cd vscode-extension
 npm install
 npm run lint
+npm run test:contracts
 npm run test
 npm run build
 ```

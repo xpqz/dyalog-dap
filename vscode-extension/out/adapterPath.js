@@ -8,9 +8,9 @@ exports.expandWorkspace = expandWorkspace;
 exports.isObject = isObject;
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
-function resolveAdapterPath(config, workspaceFolder, env = process.env, fileExists = fs_1.default.existsSync) {
+function resolveAdapterPath(config, workspaceFolder, env = process.env, fileExists = fs_1.default.existsSync, platform = process.platform) {
     const candidates = [];
-    const windows = process.platform === "win32";
+    const windows = platform === "win32";
     const executableName = windows ? "dap-adapter.exe" : "dap-adapter";
     const workspacePath = workspaceFolder?.uri?.fsPath ?? "";
     const adapterPath = asNonEmptyString(config.adapterPath);

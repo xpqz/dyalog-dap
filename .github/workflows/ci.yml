@@ -39,6 +39,9 @@ jobs:
       - name: Lint extension
         working-directory: vscode-extension
         run: npm run lint
+      - name: Contract test extension
+        working-directory: vscode-extension
+        run: npm run test:contracts
       - name: Test extension
         working-directory: vscode-extension
         run: npm run test

@@ -41,6 +41,7 @@ exports.deactivate = deactivate;
 const path_1 = __importDefault(require("path"));
 const vscode = __importStar(require("vscode"));
 const adapterPath_1 = require("./adapterPath");
+const contracts_1 = require("./contracts");
 const setup_1 = require("./setup");
 function activate(context) {
     const output = vscode.window.createOutputChannel("Dyalog DAP");
@@ -63,49 +64,23 @@ function activate(context) {
     });
     const configProvider = vscode.debug.registerDebugConfigurationProvider("dyalog-dap", {
         resolveDebugConfiguration(_folder, config) {
-            if (!config.type && !config.request && !config.name) {
-                return {
-                    type: "dyalog-dap",
-                    name: "Dyalog: Launch (RIDE)",
-                    request: "launch",
-                    rideAddr: "127.0.0.1:4502",
-                    adapterPath: "${workspaceFolder}/dap-adapter"
-                };
-            }
-            if (!config.type) {
-                config.type = "dyalog-dap";
-            }
-            if (!config.request) {
-                config.request = "launch";
-            }
-            if (!config.name) {
-                config.name = "Dyalog: Debug";
-            }
-            return config;
+            return (0, contracts_1.resolveDebugConfigurationContract)(config);
         }
     });
     const descriptorFactory = vscode.debug.registerDebugAdapterDescriptorFactory("dyalog-dap", {
         createDebugAdapterDescriptor(session) {
             const config = (session.configuration ?? {});
-            const adapterPath = (0, adapterPath_1.resolveAdapterPath)(config, session.workspaceFolder);
-            if (adapterPath === "") {
-                const message = "Unable to locate dap-adapter. Run 'Dyalog DAP: Validate Adapter Path', set launch.json adapterPath, or set DYALOG_DAP_ADAPTER_PATH.";
+            const contract = (0, contracts_1.buildAdapterLaunchContract)(config, session.workspaceFolder?.uri?.fsPath ?? "", process.env);
+            if (typeof contract.error === "string" && contract.error !== "") {
                 logDiagnostic(output, "error", "adapter.resolve.failed", {
                     rideAddr: asNonEmptyString(config.rideAddr),
                     workspace: session.workspaceFolder?.uri?.fsPath ?? ""
                 });
-                throw new Error(message);
+                throw new Error(contract.error);
             }
-            const args = Array.isArray(config.adapterArgs) ? config.adapterArgs.map(String) : [];
-            const env = { ...process.env };
-            if ((0, adapterPath_1.isObject)(config.adapterEnv)) {
-                for (const [key, value] of Object.entries(config.adapterEnv)) {
-                    env[String(key)] = String(value);
-                }
-            }
-            if (typeof config.rideAddr === "string" && config.rideAddr !== "" && !env.DYALOG_RIDE_ADDR) {
-                env.DYALOG_RIDE_ADDR = config.rideAddr;
-            }
+            const adapterPath = contract.adapterPath;
+            const args = contract.args;
+            const env = contract.env;
             logDiagnostic(output, "info", "adapter.spawn", {
                 adapterPath,
                 request: asNonEmptyString(config.request),
