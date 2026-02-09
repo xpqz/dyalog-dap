@@ -8,7 +8,7 @@ import (
 func TestEncodeCommand_EncodesCommandArray(t *testing.T) {
 	codec := NewCodec()
 
-	payload, err := codec.EncodeCommand("Execute", map[string]any{"text": "      1+1\n", "trace": 0})
+	payload, err := codec.EncodeCommand("Execute", ExecuteArgs{Text: "      1+1\n", Trace: 0})
 	if err != nil {
 		t.Fatalf("EncodeCommand failed: %v", err)
 	}
@@ -29,16 +29,19 @@ func TestEncodeCommand_EncodesCommandArray(t *testing.T) {
 		t.Fatalf("unexpected command: %q", cmd)
 	}
 
-	var args map[string]any
+	var args ExecuteArgs
 	if err := json.Unmarshal(arr[1], &args); err != nil {
 		t.Fatalf("failed to decode args: %v", err)
 	}
-	if args["text"] != "      1+1\n" {
-		t.Fatalf("text arg mismatch: %v", args["text"])
+	if args.Text != "      1+1\n" {
+		t.Fatalf("text arg mismatch: %q", args.Text)
+	}
+	if args.Trace != 0 {
+		t.Fatalf("trace arg mismatch: %d", args.Trace)
 	}
 }
 
-func TestDecodePayload_KnownCommand(t *testing.T) {
+func TestDecodePayload_KnownCommand_DecodesTypedArgs(t *testing.T) {
 	codec := NewCodec()
 
 	decoded, err := codec.DecodePayload(`["Execute",{"text":"      1+1\n","trace":0}]`)
@@ -53,6 +56,61 @@ func TestDecodePayload_KnownCommand(t *testing.T) {
 	}
 	if decoded.Command != "Execute" {
 		t.Fatalf("unexpected command: %q", decoded.Command)
+	}
+
+	executeArgs, ok := decoded.Args.(ExecuteArgs)
+	if !ok {
+		t.Fatalf("expected ExecuteArgs, got %T", decoded.Args)
+	}
+	if executeArgs.Text != "      1+1\n" {
+		t.Fatalf("text mismatch: %q", executeArgs.Text)
+	}
+	if executeArgs.Trace != 0 {
+		t.Fatalf("trace mismatch: %d", executeArgs.Trace)
+	}
+}
+
+func TestDecodePayload_OpenWindow_DecodesTypedArgsAndNormalizesBoolFlags(t *testing.T) {
+	codec := NewCodec()
+
+	decoded, err := codec.DecodePayload(`["OpenWindow",{
+		"token":123,
+		"name":"f",
+		"text":["a←1","b←2"],
+		"debugger":1,
+		"readOnly":0,
+		"entityType":1,
+		"currentRow":2,
+		"currentColumn":3,
+		"stop":[1,2],
+		"monitor":[3],
+		"trace":[4]
+	}]`)
+	if err != nil {
+		t.Fatalf("DecodePayload failed: %v", err)
+	}
+	windowArgs, ok := decoded.Args.(WindowContentArgs)
+	if !ok {
+		t.Fatalf("expected WindowContentArgs, got %T", decoded.Args)
+	}
+
+	if windowArgs.Token != 123 {
+		t.Fatalf("token mismatch: %d", windowArgs.Token)
+	}
+	if windowArgs.Name != "f" {
+		t.Fatalf("name mismatch: %q", windowArgs.Name)
+	}
+	if !windowArgs.Debugger {
+		t.Fatal("expected debugger=true")
+	}
+	if windowArgs.ReadOnly {
+		t.Fatal("expected readOnly=false")
+	}
+	if len(windowArgs.Text) != 2 || windowArgs.Text[0] != "a←1" {
+		t.Fatalf("text mismatch: %#v", windowArgs.Text)
+	}
+	if len(windowArgs.Stop) != 2 || windowArgs.Stop[0] != 1 || windowArgs.Stop[1] != 2 {
+		t.Fatalf("stop mismatch: %#v", windowArgs.Stop)
 	}
 }
 
@@ -71,6 +129,13 @@ func TestDecodePayload_UnknownCommandIsTolerated(t *testing.T) {
 	}
 	if decoded.Command != "NewFutureCommand" {
 		t.Fatalf("unexpected command: %q", decoded.Command)
+	}
+	args, ok := decoded.Args.(map[string]any)
+	if !ok {
+		t.Fatalf("expected unknown args map, got %T", decoded.Args)
+	}
+	if args["x"].(float64) != 1 {
+		t.Fatalf("unexpected unknown arg payload: %#v", args)
 	}
 }
 
