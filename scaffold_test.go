@@ -655,3 +655,22 @@ func TestScaffold_HasDiagnosticBundleWorkflowAndTriageDocs(t *testing.T) {
 		}
 	}
 }
+
+func TestScaffold_HasDiagnosticBundleIntegrationCommandTest(t *testing.T) {
+	path := "vscode-extension/src/test/extensionBundleCommand.integration.test.ts"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("missing %s: %v", path, err)
+	}
+	text := string(data)
+	requiredSnippets := []string{
+		"dyalogDap.generateDiagnosticBundle",
+		"diagnostic-bundle-",
+		"redacted",
+	}
+	for _, snippet := range requiredSnippets {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected %s to contain %q", path, snippet)
+		}
+	}
+}
