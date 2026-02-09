@@ -155,6 +155,13 @@ func TestHandleRequest_PauseUsesWeakInterrupt(t *testing.T) {
 	if !resp.Success {
 		t.Fatalf("expected pause success, got %s", resp.Message)
 	}
+	body, ok := resp.Body.(PauseResponseBody)
+	if !ok {
+		t.Fatalf("expected PauseResponseBody, got %T", resp.Body)
+	}
+	if body.InterruptMethod != "weak" {
+		t.Fatalf("expected weak interrupt method, got %q", body.InterruptMethod)
+	}
 
 	call := ride.lastCall()
 	if call.command != "WeakInterrupt" {
@@ -162,6 +169,32 @@ func TestHandleRequest_PauseUsesWeakInterrupt(t *testing.T) {
 	}
 	if len(call.args) != 0 {
 		t.Fatalf("expected no args for WeakInterrupt, got %#v", call.args)
+	}
+}
+
+func TestHandleRequest_PauseWeakInterruptFailureUsesStrongInterrupt(t *testing.T) {
+	ride := &mockRideController{
+		sendErrByCommand: map[string]error{
+			"WeakInterrupt": errors.New("weak failed"),
+		},
+	}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+
+	resp, _ := server.HandleRequest(Request{Seq: 12, Command: "pause"})
+	if !resp.Success {
+		t.Fatalf("expected pause success via strong interrupt, got %s", resp.Message)
+	}
+	body := resp.Body.(PauseResponseBody)
+	if body.InterruptMethod != "strong" {
+		t.Fatalf("expected strong interrupt method, got %q", body.InterruptMethod)
+	}
+	if len(ride.calls) != 2 {
+		t.Fatalf("expected weak then strong attempts, got %#v", ride.calls)
+	}
+	if ride.calls[0].command != "WeakInterrupt" || ride.calls[1].command != "StrongInterrupt" {
+		t.Fatalf("unexpected interrupt command sequence: %#v", ride.calls)
 	}
 }
 
@@ -182,6 +215,10 @@ func TestHandleRequest_PauseWeakInterruptFailureUsesFallbackHook(t *testing.T) {
 	resp, _ := server.HandleRequest(Request{Seq: 12, Command: "pause"})
 	if !resp.Success {
 		t.Fatalf("expected pause success with fallback, got %s", resp.Message)
+	}
+	body := resp.Body.(PauseResponseBody)
+	if body.InterruptMethod != "fallback" {
+		t.Fatalf("expected fallback interrupt method, got %q", body.InterruptMethod)
 	}
 	if fallbackCalls != 1 {
 		t.Fatalf("expected fallback to be called once, got %d", fallbackCalls)
@@ -218,14 +255,12 @@ type rideCall struct {
 }
 
 type mockRideController struct {
-	calls   []rideCall
-	sendErr error
+	calls            []rideCall
+	sendErr          error
+	sendErrByCommand map[string]error
 }
 
 func (m *mockRideController) SendCommand(command string, args any) error {
-	if m.sendErr != nil {
-		return m.sendErr
-	}
 	typedArgs := map[string]any{}
 	if args != nil {
 		typedArgs = args.(map[string]any)
@@ -234,6 +269,15 @@ func (m *mockRideController) SendCommand(command string, args any) error {
 		command: command,
 		args:    typedArgs,
 	})
+
+	if m.sendErrByCommand != nil {
+		if err, ok := m.sendErrByCommand[command]; ok {
+			return err
+		}
+	}
+	if m.sendErr != nil {
+		return m.sendErr
+	}
 	return nil
 }
 

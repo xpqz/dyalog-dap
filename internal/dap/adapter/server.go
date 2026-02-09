@@ -66,6 +66,11 @@ type SetBreakpointsResponseBody struct {
 	Breakpoints []Breakpoint `json:"breakpoints"`
 }
 
+// PauseResponseBody reports which interrupt mechanism succeeded.
+type PauseResponseBody struct {
+	InterruptMethod string `json:"interruptMethod"`
+}
+
 // Capabilities describes the adapter's currently supported DAP feature set.
 type Capabilities struct {
 	SupportsConfigurationDoneRequest  bool `json:"supportsConfigurationDoneRequest"`
@@ -320,14 +325,17 @@ func (s *Server) handleControlCommand(req Request) Response {
 		return s.sendWindowCommand(req, "ContinueTrace")
 	case "pause":
 		if err := s.rideController.SendCommand("WeakInterrupt", map[string]any{}); err != nil {
-			if s.pauseFallback == nil {
-				return s.failure(req, "WeakInterrupt failed and no pause fallback configured")
+			if strongErr := s.rideController.SendCommand("StrongInterrupt", map[string]any{}); strongErr == nil {
+				return s.successWithBody(req, PauseResponseBody{InterruptMethod: "strong"})
 			}
-			if fallbackErr := s.pauseFallback(); fallbackErr != nil {
-				return s.failure(req, "WeakInterrupt and pause fallback failed")
+			if s.pauseFallback != nil {
+				if fallbackErr := s.pauseFallback(); fallbackErr == nil {
+					return s.successWithBody(req, PauseResponseBody{InterruptMethod: "fallback"})
+				}
 			}
+			return s.failure(req, "WeakInterrupt and StrongInterrupt failed")
 		}
-		return s.success(req)
+		return s.successWithBody(req, PauseResponseBody{InterruptMethod: "weak"})
 	default:
 		return s.failure(req, "unsupported command")
 	}
@@ -1306,6 +1314,15 @@ func (s *Server) success(req Request) Response {
 		RequestSeq: req.Seq,
 		Command:    req.Command,
 		Success:    true,
+	}
+}
+
+func (s *Server) successWithBody(req Request, body any) Response {
+	return Response{
+		RequestSeq: req.Seq,
+		Command:    req.Command,
+		Success:    true,
+		Body:       body,
 	}
 }
 
