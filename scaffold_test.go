@@ -1,6 +1,7 @@
 package lspdap_test
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"testing"
@@ -38,5 +39,62 @@ func TestScaffold_CommandBuilds(t *testing.T) {
 func TestScaffold_HasLintConfig(t *testing.T) {
 	if _, err := os.Stat(".golangci.yml"); err != nil {
 		t.Fatalf("missing .golangci.yml: %v", err)
+	}
+}
+
+func TestScaffold_HasVSCodeLaunchSmokeConfig(t *testing.T) {
+	data, err := os.ReadFile(".vscode/launch.json")
+	if err != nil {
+		t.Fatalf("missing .vscode/launch.json: %v", err)
+	}
+
+	var launch struct {
+		Configurations []struct {
+			Name    string `json:"name"`
+			Type    string `json:"type"`
+			Request string `json:"request"`
+		} `json:"configurations"`
+	}
+	if err := json.Unmarshal(data, &launch); err != nil {
+		t.Fatalf("launch.json is not valid JSON: %v", err)
+	}
+
+	found := false
+	for _, cfg := range launch.Configurations {
+		if cfg.Name == "DAP Adapter Smoke (Go)" && cfg.Type == "go" && cfg.Request == "launch" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected VS Code launch config 'DAP Adapter Smoke (Go)'")
+	}
+}
+
+func TestScaffold_HasVSCodeSmokeTasks(t *testing.T) {
+	data, err := os.ReadFile(".vscode/tasks.json")
+	if err != nil {
+		t.Fatalf("missing .vscode/tasks.json: %v", err)
+	}
+
+	var tasks struct {
+		Tasks []struct {
+			Label string `json:"label"`
+			Type  string `json:"type"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal(data, &tasks); err != nil {
+		t.Fatalf("tasks.json is not valid JSON: %v", err)
+	}
+
+	found := false
+	for _, task := range tasks.Tasks {
+		if task.Label == "build dap-adapter" && task.Type == "shell" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected VS Code task 'build dap-adapter'")
 	}
 }

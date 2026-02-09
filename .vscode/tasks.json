@@ -1,0 +1,28 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build dap-adapter",
+      "type": "shell",
+      "command": "go build ./cmd/dap-adapter",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$go"
+      ],
+      "group": "build"
+    },
+    {
+      "label": "test smoke",
+      "type": "shell",
+      "command": "go test ./internal/integration/harness -run TestHarness_StartInitializesSessionAndCapturesTranscript -count=1",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$go"
+      ]
+    }
+  ]
+}

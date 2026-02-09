@@ -1,0 +1,27 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "DAP Adapter Smoke (Go)",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/cmd/dap-adapter",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "build dap-adapter"
+    },
+    {
+      "name": "Harness Integration Smoke",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${workspaceFolder}/internal/integration/harness",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "-run",
+        "TestHarness_StartInitializesSessionAndCapturesTranscript"
+      ],
+      "preLaunchTask": "test smoke"
+    }
+  ]
+}
