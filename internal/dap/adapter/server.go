@@ -54,6 +54,17 @@ type StackTraceResponseBody struct {
 	TotalFrames int          `json:"totalFrames"`
 }
 
+// Breakpoint describes one DAP breakpoint result.
+type Breakpoint struct {
+	Verified bool `json:"verified"`
+	Line     int  `json:"line,omitempty"`
+}
+
+// SetBreakpointsResponseBody is returned by DAP setBreakpoints requests.
+type SetBreakpointsResponseBody struct {
+	Breakpoints []Breakpoint `json:"breakpoints"`
+}
+
 // Capabilities describes the adapter's currently supported DAP feature set.
 type Capabilities struct {
 	SupportsConfigurationDoneRequest  bool `json:"supportsConfigurationDoneRequest"`
@@ -118,6 +129,12 @@ type sourceBinding struct {
 	path        string
 	sourceRef   int
 	displayName string
+}
+
+type setBreakpointsArguments struct {
+	path            string
+	sourceReference int
+	lines           []int
 }
 
 // StoppedEventBody is emitted for DAP stopped events synthesized from RIDE lifecycle signals.
@@ -247,6 +264,8 @@ func (s *Server) HandleRequest(req Request) (Response, []Event) {
 		return s.handleThreadsRequest(req), nil
 	case "stackTrace":
 		return s.handleStackTraceRequest(req), nil
+	case "setBreakpoints":
+		return s.handleSetBreakpointsRequest(req), nil
 
 	default:
 		return s.failure(req, "unsupported command"), nil
@@ -335,6 +354,51 @@ func (s *Server) handleStackTraceRequest(req Request) Response {
 		Body: StackTraceResponseBody{
 			StackFrames: frames,
 			TotalFrames: len(frames),
+		},
+	}
+}
+
+func (s *Server) handleSetBreakpointsRequest(req Request) Response {
+	if s.state != stateAttachedOrLaunched {
+		return s.failure(req, "setBreakpoints requires launch or attach")
+	}
+	if s.rideController == nil {
+		return s.failure(req, "no RIDE controller configured")
+	}
+
+	args, ok := extractSetBreakpointsArguments(req.Arguments)
+	if !ok {
+		return s.failure(req, "setBreakpoints requires source and breakpoints")
+	}
+
+	token, mapped := s.resolveTokenForSetBreakpoints(args)
+	if !mapped {
+		return Response{
+			RequestSeq: req.Seq,
+			Command:    req.Command,
+			Success:    true,
+			Body: SetBreakpointsResponseBody{
+				Breakpoints: buildBreakpointResponses(args.lines, false),
+			},
+		}
+	}
+
+	stop := zeroBasedLines(args.lines)
+	if err := s.rideController.SendCommand("SetLineAttributes", map[string]any{
+		"win":     token,
+		"stop":    stop,
+		"monitor": []int{},
+		"trace":   []int{},
+	}); err != nil {
+		return s.failure(req, "failed to send SetLineAttributes")
+	}
+
+	return Response{
+		RequestSeq: req.Seq,
+		Command:    req.Command,
+		Success:    true,
+		Body: SetBreakpointsResponseBody{
+			Breakpoints: buildBreakpointResponses(args.lines, true),
 		},
 	}
 }
@@ -804,6 +868,99 @@ func extractThreadIDArgument(args any) int {
 		return 0
 	}
 	return intFromAny(m["threadId"])
+}
+
+func extractSetBreakpointsArguments(args any) (setBreakpointsArguments, bool) {
+	typedArgs, ok := args.(map[string]any)
+	if !ok {
+		return setBreakpointsArguments{}, false
+	}
+
+	source, ok := typedArgs["source"].(map[string]any)
+	if !ok {
+		return setBreakpointsArguments{}, false
+	}
+
+	parsed := setBreakpointsArguments{
+		path:            stringFromAny(source["path"]),
+		sourceReference: intFromAny(source["sourceReference"]),
+	}
+	if parsed.path == "" && parsed.sourceReference <= 0 {
+		return setBreakpointsArguments{}, false
+	}
+
+	parsed.lines = extractBreakpointLines(typedArgs)
+	return parsed, true
+}
+
+func extractBreakpointLines(args map[string]any) []int {
+	if rawBreakpoints, ok := args["breakpoints"]; ok {
+		items, ok := rawBreakpoints.([]any)
+		if !ok {
+			return nil
+		}
+
+		lines := make([]int, 0, len(items))
+		for _, raw := range items {
+			line := 0
+			if bp, ok := raw.(map[string]any); ok {
+				line = intFromAny(bp["line"])
+			}
+			lines = append(lines, line)
+		}
+		return lines
+	}
+
+	rawLines, ok := args["lines"]
+	if !ok {
+		return nil
+	}
+	items, ok := rawLines.([]any)
+	if !ok {
+		return nil
+	}
+
+	lines := make([]int, 0, len(items))
+	for _, raw := range items {
+		lines = append(lines, intFromAny(raw))
+	}
+	return lines
+}
+
+func (s *Server) resolveTokenForSetBreakpoints(args setBreakpointsArguments) (int, bool) {
+	if args.sourceReference > 0 {
+		token, ok := s.tokenBySourceRef[args.sourceReference]
+		return token, ok
+	}
+
+	sourceRef, ok := s.sourceRefByPath[args.path]
+	if !ok {
+		return 0, false
+	}
+	token, ok := s.tokenBySourceRef[sourceRef]
+	return token, ok
+}
+
+func buildBreakpointResponses(lines []int, verified bool) []Breakpoint {
+	breakpoints := make([]Breakpoint, 0, len(lines))
+	for _, line := range lines {
+		breakpoints = append(breakpoints, Breakpoint{
+			Verified: verified,
+			Line:     line,
+		})
+	}
+	return breakpoints
+}
+
+func zeroBasedLines(lines []int) []int {
+	converted := make([]int, 0, len(lines))
+	for _, line := range lines {
+		if line <= 0 {
+			continue
+		}
+		converted = append(converted, line-1)
+	}
+	return converted
 }
 
 func oneBased(value int) int {
