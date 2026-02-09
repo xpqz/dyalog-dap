@@ -139,6 +139,70 @@ func TestDecodePayload_UnknownCommandIsTolerated(t *testing.T) {
 	}
 }
 
+func TestDecodePayload_UndocumentedCommandSubset_DecodesTypedArgs(t *testing.T) {
+	codec := NewCodec()
+
+	t.Run("GetWindowLayout", func(t *testing.T) {
+		decoded, err := codec.DecodePayload(`["GetWindowLayout",{}]`)
+		if err != nil {
+			t.Fatalf("DecodePayload failed: %v", err)
+		}
+		if !decoded.Known {
+			t.Fatal("expected GetWindowLayout to be known")
+		}
+		if _, ok := decoded.Args.(EmptyArgs); !ok {
+			t.Fatalf("expected EmptyArgs, got %T", decoded.Args)
+		}
+	})
+
+	t.Run("SetSIStack", func(t *testing.T) {
+		decoded, err := codec.DecodePayload(`["SetSIStack",{"stack":"#.fn[2]"}]`)
+		if err != nil {
+			t.Fatalf("DecodePayload failed: %v", err)
+		}
+		if !decoded.Known {
+			t.Fatal("expected SetSIStack to be known")
+		}
+		args, ok := decoded.Args.(SetSIStackArgs)
+		if !ok {
+			t.Fatalf("expected SetSIStackArgs, got %T", decoded.Args)
+		}
+		if args.Stack != "#.fn[2]" {
+			t.Fatalf("stack mismatch: %q", args.Stack)
+		}
+	})
+
+	t.Run("ExitMultilineInput", func(t *testing.T) {
+		decoded, err := codec.DecodePayload(`["ExitMultilineInput",{}]`)
+		if err != nil {
+			t.Fatalf("DecodePayload failed: %v", err)
+		}
+		if !decoded.Known {
+			t.Fatal("expected ExitMultilineInput to be known")
+		}
+		if _, ok := decoded.Args.(ExitMultilineInputArgs); !ok {
+			t.Fatalf("expected ExitMultilineInputArgs, got %T", decoded.Args)
+		}
+	})
+
+	t.Run("SetSessionLineGroup", func(t *testing.T) {
+		decoded, err := codec.DecodePayload(`["SetSessionLineGroup",{"line_offset":3,"group":14}]`)
+		if err != nil {
+			t.Fatalf("DecodePayload failed: %v", err)
+		}
+		if !decoded.Known {
+			t.Fatal("expected SetSessionLineGroup to be known")
+		}
+		args, ok := decoded.Args.(SetSessionLineGroupArgs)
+		if !ok {
+			t.Fatalf("expected SetSessionLineGroupArgs, got %T", decoded.Args)
+		}
+		if args.LineOffset != 3 || args.Group != 14 {
+			t.Fatalf("unexpected decoded args: %#v", args)
+		}
+	})
+}
+
 func TestDecodePayload_NonJSONIsRaw(t *testing.T) {
 	codec := NewCodec()
 

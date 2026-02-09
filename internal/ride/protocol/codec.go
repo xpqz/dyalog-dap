@@ -178,6 +178,20 @@ type InternalErrorArgs struct {
 	Message   string `json:"message"`
 }
 
+// SetSIStackArgs models SetSIStack.
+type SetSIStackArgs struct {
+	Stack string `json:"stack"`
+}
+
+// ExitMultilineInputArgs models ExitMultilineInput.
+type ExitMultilineInputArgs struct{}
+
+// SetSessionLineGroupArgs models SetSessionLineGroup.
+type SetSessionLineGroupArgs struct {
+	LineOffset int `json:"line_offset"`
+	Group      int `json:"group"`
+}
+
 // EmptyArgs represents commands with empty argument objects.
 type EmptyArgs struct{}
 
@@ -222,6 +236,9 @@ func NewCodec() *Codec {
 		"SysError":              {},
 		"UnknownCommand":        {},
 		"InternalError":         {},
+		"SetSIStack":            {},
+		"ExitMultilineInput":    {},
+		"SetSessionLineGroup":   {},
 		"WindowTypeChanged":     {},
 		"GetAutocomplete":       {},
 		"ReplyGetAutocomplete":  {},
@@ -266,6 +283,9 @@ func NewCodec() *Codec {
 			"SysError":            decodeSysErrorArgs,
 			"UnknownCommand":      decodeUnknownCommandArgs,
 			"InternalError":       decodeInternalErrorArgs,
+			"SetSIStack":          decodeSetSIStackArgs,
+			"ExitMultilineInput":  decodeExitMultilineInputArgs,
+			"SetSessionLineGroup": decodeSetSessionLineGroupArgs,
 			"WindowTypeChanged":   decodeWindowTypeChangedArgs,
 		},
 	}
@@ -500,6 +520,23 @@ func decodeInternalErrorArgs(args map[string]any) any {
 		ErrorText: getString(args, "error_text"),
 		DMX:       args["dmx"],
 		Message:   getString(args, "message"),
+	}
+}
+
+func decodeSetSIStackArgs(args map[string]any) any {
+	return SetSIStackArgs{
+		Stack: getString(args, "stack"),
+	}
+}
+
+func decodeExitMultilineInputArgs(map[string]any) any {
+	return ExitMultilineInputArgs{}
+}
+
+func decodeSetSessionLineGroupArgs(args map[string]any) any {
+	return SetSessionLineGroupArgs{
+		LineOffset: getInt(args, "line_offset"),
+		Group:      getInt(args, "group"),
 	}
 }
 
