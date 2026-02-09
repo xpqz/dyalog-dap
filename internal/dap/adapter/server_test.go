@@ -923,8 +923,11 @@ func TestHandleRequest_SetBreakpointsUnverifiedWhenSourceNotMapped(t *testing.T)
 	if !resp.Success {
 		t.Fatalf("expected setBreakpoints success with unverified breakpoints, got %s", resp.Message)
 	}
-	if len(ride.calls) != 0 {
-		t.Fatalf("expected no RIDE command send, got %#v", ride.calls)
+	if len(ride.calls) != 1 {
+		t.Fatalf("expected one RIDE command send, got %#v", ride.calls)
+	}
+	if ride.calls[0].command != "GetWindowLayout" {
+		t.Fatalf("expected GetWindowLayout sync request, got %q", ride.calls[0].command)
 	}
 
 	body := resp.Body.(SetBreakpointsResponseBody)
@@ -933,5 +936,164 @@ func TestHandleRequest_SetBreakpointsUnverifiedWhenSourceNotMapped(t *testing.T)
 	}
 	if body.Breakpoints[0].Verified {
 		t.Fatal("expected unverified breakpoint for unmapped source")
+	}
+}
+
+func TestHandleRidePayload_OpenWindowAppliesDeferredBreakpoints(t *testing.T) {
+	ride := &mockRideController{}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+
+	resp, _ := server.HandleRequest(Request{
+		Seq:     73,
+		Command: "setBreakpoints",
+		Arguments: map[string]any{
+			"source": map[string]any{
+				"path": "/ws/src/deferred.apl",
+			},
+			"breakpoints": []any{
+				map[string]any{"line": 4},
+				map[string]any{"line": 9},
+			},
+		},
+	})
+	if !resp.Success {
+		t.Fatalf("expected setBreakpoints success, got %s", resp.Message)
+	}
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    501,
+			Filename: "/ws/src/deferred.apl",
+		},
+	})
+
+	if len(ride.calls) < 2 {
+		t.Fatalf("expected deferred SetLineAttributes call after sync request, got %#v", ride.calls)
+	}
+	last := ride.lastCall()
+	if last.command != "SetLineAttributes" {
+		t.Fatalf("expected SetLineAttributes, got %q", last.command)
+	}
+	if last.args["win"] != 501 {
+		t.Fatalf("expected win=501, got %#v", last.args["win"])
+	}
+	stop := last.args["stop"].([]int)
+	if len(stop) != 2 || stop[0] != 3 || stop[1] != 8 {
+		t.Fatalf("expected stop=[3 8], got %#v", stop)
+	}
+}
+
+func TestHandleRequest_SetBreakpointsUnmappedReplacesDeferredLines(t *testing.T) {
+	ride := &mockRideController{}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+
+	_, _ = server.HandleRequest(Request{
+		Seq:     74,
+		Command: "setBreakpoints",
+		Arguments: map[string]any{
+			"source": map[string]any{
+				"path": "/ws/src/replace.apl",
+			},
+			"breakpoints": []any{
+				map[string]any{"line": 2},
+			},
+		},
+	})
+	_, _ = server.HandleRequest(Request{
+		Seq:     75,
+		Command: "setBreakpoints",
+		Arguments: map[string]any{
+			"source": map[string]any{
+				"path": "/ws/src/replace.apl",
+			},
+			"breakpoints": []any{
+				map[string]any{"line": 7},
+			},
+		},
+	})
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    502,
+			Filename: "/ws/src/replace.apl",
+		},
+	})
+
+	last := ride.lastCall()
+	if last.command != "SetLineAttributes" {
+		t.Fatalf("expected SetLineAttributes, got %q", last.command)
+	}
+	stop := last.args["stop"].([]int)
+	if len(stop) != 1 || stop[0] != 6 {
+		t.Fatalf("expected latest deferred stop=[6], got %#v", stop)
+	}
+}
+
+func TestHandleRidePayload_ReopenSourceAppliesDeferredBySourceReference(t *testing.T) {
+	ride := &mockRideController{}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    503,
+			Filename: "/ws/src/source-ref.apl",
+		},
+	})
+	sourceRef, ok := server.ResolveSourceReferenceForToken(503)
+	if !ok {
+		t.Fatal("expected source reference")
+	}
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "CloseWindow",
+		Args: protocol.WindowArgs{
+			Win: 503,
+		},
+	})
+
+	_, _ = server.HandleRequest(Request{
+		Seq:     76,
+		Command: "setBreakpoints",
+		Arguments: map[string]any{
+			"source": map[string]any{
+				"sourceReference": sourceRef,
+			},
+			"breakpoints": []any{
+				map[string]any{"line": 12},
+			},
+		},
+	})
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    504,
+			Filename: "/ws/src/source-ref.apl",
+		},
+	})
+
+	last := ride.lastCall()
+	if last.command != "SetLineAttributes" {
+		t.Fatalf("expected SetLineAttributes, got %q", last.command)
+	}
+	if last.args["win"] != 504 {
+		t.Fatalf("expected win=504, got %#v", last.args["win"])
+	}
+	stop := last.args["stop"].([]int)
+	if len(stop) != 1 || stop[0] != 11 {
+		t.Fatalf("expected stop=[11], got %#v", stop)
 	}
 }

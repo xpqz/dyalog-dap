@@ -107,6 +107,8 @@ type Server struct {
 	tokenBySourceRef   map[int]int
 	sourceRefByPath    map[string]int
 	pathBySourceRef    map[int]string
+	pendingByPath      map[string][]int
+	pendingBySourceRef map[int][]int
 	nextSourceRef      int
 	syntheticThreadIDs map[string]int
 	nextSyntheticID    int
@@ -170,6 +172,8 @@ func NewServer() *Server {
 		tokenBySourceRef:   map[int]int{},
 		sourceRefByPath:    map[string]int{},
 		pathBySourceRef:    map[int]string{},
+		pendingByPath:      map[string][]int{},
+		pendingBySourceRef: map[int][]int{},
 		nextSourceRef:      1,
 		syntheticThreadIDs: map[string]int{},
 		nextSyntheticID:    1000000,
@@ -373,6 +377,8 @@ func (s *Server) handleSetBreakpointsRequest(req Request) Response {
 
 	token, mapped := s.resolveTokenForSetBreakpoints(args)
 	if !mapped {
+		s.deferBreakpoints(args)
+		s.requestWindowLayoutSync()
 		return Response{
 			RequestSeq: req.Seq,
 			Command:    req.Command,
@@ -392,6 +398,7 @@ func (s *Server) handleSetBreakpointsRequest(req Request) Response {
 	}); err != nil {
 		return s.failure(req, "failed to send SetLineAttributes")
 	}
+	s.clearDeferredBreakpoints(args)
 
 	return Response{
 		RequestSeq: req.Seq,
@@ -427,6 +434,7 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 			return nil
 		}
 		s.bindTokenToSource(window.Token, window.Filename, window.Name)
+		s.applyDeferredBreakpoints(window.Token)
 		if window.Debugger {
 			s.updateTracerWindow(window)
 		}
@@ -457,6 +465,7 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 			return nil
 		}
 		s.bindTokenToSource(window.Token, window.Filename, window.Name)
+		s.applyDeferredBreakpoints(window.Token)
 		if !window.Debugger {
 			return nil
 		}
@@ -939,6 +948,70 @@ func (s *Server) resolveTokenForSetBreakpoints(args setBreakpointsArguments) (in
 	}
 	token, ok := s.tokenBySourceRef[sourceRef]
 	return token, ok
+}
+
+func (s *Server) deferBreakpoints(args setBreakpointsArguments) {
+	s.clearDeferredBreakpoints(args)
+	lines := append([]int{}, args.lines...)
+	if args.path != "" {
+		s.pendingByPath[args.path] = lines
+	}
+	if args.sourceReference > 0 {
+		s.pendingBySourceRef[args.sourceReference] = lines
+	}
+}
+
+func (s *Server) clearDeferredBreakpoints(args setBreakpointsArguments) {
+	if args.path != "" {
+		delete(s.pendingByPath, args.path)
+		if sourceRef, ok := s.sourceRefByPath[args.path]; ok {
+			delete(s.pendingBySourceRef, sourceRef)
+		}
+	}
+	if args.sourceReference > 0 {
+		delete(s.pendingBySourceRef, args.sourceReference)
+		if path, ok := s.pathBySourceRef[args.sourceReference]; ok {
+			delete(s.pendingByPath, path)
+		}
+	}
+}
+
+func (s *Server) requestWindowLayoutSync() {
+	if s.rideController == nil {
+		return
+	}
+	_ = s.rideController.SendCommand("GetWindowLayout", map[string]any{})
+}
+
+func (s *Server) applyDeferredBreakpoints(token int) {
+	if s.rideController == nil || token <= 0 {
+		return
+	}
+
+	binding, ok := s.sourceByToken[token]
+	if !ok {
+		return
+	}
+
+	lines, ok := s.pendingBySourceRef[binding.sourceRef]
+	if !ok {
+		lines, ok = s.pendingByPath[binding.path]
+		if !ok {
+			return
+		}
+	}
+
+	if err := s.rideController.SendCommand("SetLineAttributes", map[string]any{
+		"win":     token,
+		"stop":    zeroBasedLines(lines),
+		"monitor": []int{},
+		"trace":   []int{},
+	}); err != nil {
+		return
+	}
+
+	delete(s.pendingBySourceRef, binding.sourceRef)
+	delete(s.pendingByPath, binding.path)
 }
 
 func buildBreakpointResponses(lines []int, verified bool) []Breakpoint {
