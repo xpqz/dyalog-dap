@@ -101,12 +101,7 @@ func (d *Dispatcher) Subscribe(buffer int) (<-chan protocol.DecodedPayload, func
 	unsubscribe := func() {
 		d.mu.Lock()
 		defer d.mu.Unlock()
-		ch, ok := d.subscribers[id]
-		if !ok {
-			return
-		}
 		delete(d.subscribers, id)
-		close(ch)
 	}
 
 	return ch, unsubscribe
@@ -172,12 +167,14 @@ func (d *Dispatcher) handlePromptType(promptType int) {
 
 	for _, cmd := range queued {
 		if err := d.writeCommand(cmd); err != nil {
-			// If flush fails, preserve order by prepending the failed command.
+			// If flush fails, preserve order by prepending failed and remaining commands.
 			d.mu.Lock()
-			d.queue = append([]outboundCommand{cmd}, d.queue...)
+			remainder := append([]outboundCommand{}, queued...)
+			d.queue = append(remainder, d.queue...)
 			d.mu.Unlock()
 			return
 		}
+		queued = queued[1:]
 	}
 }
 
@@ -190,19 +187,43 @@ func (d *Dispatcher) writeCommand(cmd outboundCommand) error {
 }
 
 func (d *Dispatcher) publish(decoded protocol.DecodedPayload) {
+	type subscriber struct {
+		id int
+		ch chan protocol.DecodedPayload
+	}
+
 	d.mu.Lock()
-	subs := make([]chan protocol.DecodedPayload, 0, len(d.subscribers))
-	for _, subscriber := range d.subscribers {
-		subs = append(subs, subscriber)
+	subs := make([]subscriber, 0, len(d.subscribers))
+	for id, ch := range d.subscribers {
+		subs = append(subs, subscriber{id: id, ch: ch})
 	}
 	d.mu.Unlock()
 
 	for _, subscriber := range subs {
-		select {
-		case subscriber <- decoded:
-		default:
+		if d.tryPublish(subscriber.ch, decoded) {
+			continue
 		}
+
+		d.mu.Lock()
+		if current, ok := d.subscribers[subscriber.id]; ok && current == subscriber.ch {
+			delete(d.subscribers, subscriber.id)
+		}
+		d.mu.Unlock()
 	}
+}
+
+func (d *Dispatcher) tryPublish(ch chan protocol.DecodedPayload, decoded protocol.DecodedPayload) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+
+	select {
+	case ch <- decoded:
+	default:
+	}
+	return true
 }
 
 func extractPromptType(args any) (int, bool) {

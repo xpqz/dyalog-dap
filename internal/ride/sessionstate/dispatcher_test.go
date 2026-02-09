@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -140,6 +141,84 @@ func TestDispatcher_DoesNotBlockOnSlowSubscriber(t *testing.T) {
 	}
 }
 
+func TestDispatcher_FlushFailureRequeuesRemainingCommandsInOrder(t *testing.T) {
+	transport := newMockTransport()
+	dispatcher := NewDispatcher(transport, protocol.NewCodec())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		dispatcher.Run(ctx)
+		close(done)
+	}()
+
+	transport.push(`["SetPromptType",{"type":0}]`)
+	waitForCondition(t, 250*time.Millisecond, func() bool {
+		promptType, known := dispatcher.PromptType()
+		return known && promptType == 0
+	})
+
+	if err := dispatcher.SendCommand("Execute", protocol.ExecuteArgs{Text: "cmd1\n", Trace: 0}); err != nil {
+		t.Fatalf("queue cmd1 failed: %v", err)
+	}
+	if err := dispatcher.SendCommand("Execute", protocol.ExecuteArgs{Text: "cmd2\n", Trace: 0}); err != nil {
+		t.Fatalf("queue cmd2 failed: %v", err)
+	}
+
+	transport.failNextWrite(errors.New("synthetic write failure"))
+	transport.push(`["SetPromptType",{"type":1}]`)
+
+	time.Sleep(30 * time.Millisecond)
+
+	transport.push(`["SetPromptType",{"type":0}]`)
+	transport.push(`["SetPromptType",{"type":1}]`)
+
+	first := waitForWrite(t, transport.writeCh, 250*time.Millisecond)
+	second := waitForWrite(t, transport.writeCh, 250*time.Millisecond)
+	firstCmd, err := decodeCommandPayload(first)
+	if err != nil {
+		t.Fatalf("decode first payload failed: %v", err)
+	}
+	secondCmd, err := decodeCommandPayload(second)
+	if err != nil {
+		t.Fatalf("decode second payload failed: %v", err)
+	}
+
+	if firstCmd.Name != "Execute" || secondCmd.Name != "Execute" {
+		t.Fatalf("expected Execute/Execute, got %s/%s", firstCmd.Name, secondCmd.Name)
+	}
+	if firstCmd.Text != "cmd1\n" || secondCmd.Text != "cmd2\n" {
+		t.Fatalf("expected cmd1 then cmd2, got %q then %q", firstCmd.Text, secondCmd.Text)
+	}
+
+	transport.close()
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("dispatcher did not stop")
+	}
+}
+
+func TestDispatcher_PublishDoesNotPanicWhenSubscriberChannelIsClosed(t *testing.T) {
+	dispatcher := NewDispatcher(newMockTransport(), protocol.NewCodec())
+	_, _ = dispatcher.Subscribe(1)
+
+	dispatcher.mu.Lock()
+	for _, subscriber := range dispatcher.subscribers {
+		close(subscriber)
+		break
+	}
+	dispatcher.mu.Unlock()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("publish panicked with closed subscriber: %v", r)
+		}
+	}()
+	dispatcher.publish(protocol.DecodedPayload{Kind: protocol.KindRaw, Raw: "x"})
+}
+
 type readResult struct {
 	payload string
 	err     error
@@ -148,6 +227,9 @@ type readResult struct {
 type mockTransport struct {
 	readCh  chan readResult
 	writeCh chan string
+
+	mu           sync.Mutex
+	nextWriteErr error
 }
 
 func newMockTransport() *mockTransport {
@@ -174,8 +256,26 @@ func (m *mockTransport) ReadPayload() (string, error) {
 }
 
 func (m *mockTransport) WritePayload(payload string) error {
+	m.mu.Lock()
+	err := m.nextWriteErr
+	m.nextWriteErr = nil
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
 	m.writeCh <- payload
 	return nil
+}
+
+func (m *mockTransport) failNextWrite(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nextWriteErr = err
+}
+
+type decodedCommand struct {
+	Name string
+	Text string
 }
 
 func decodeCommandName(payload string) (string, error) {
@@ -191,6 +291,37 @@ func decodeCommandName(payload string) (string, error) {
 		return "", err
 	}
 	return command, nil
+}
+
+func decodeCommandPayload(payload string) (decodedCommand, error) {
+	var arr []json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &arr); err != nil {
+		return decodedCommand{}, err
+	}
+	if len(arr) < 2 {
+		return decodedCommand{}, errors.New("payload did not contain command and args")
+	}
+	var command string
+	if err := json.Unmarshal(arr[0], &command); err != nil {
+		return decodedCommand{}, err
+	}
+	var args map[string]any
+	if err := json.Unmarshal(arr[1], &args); err != nil {
+		return decodedCommand{}, err
+	}
+	text, _ := args["text"].(string)
+	return decodedCommand{Name: command, Text: text}, nil
+}
+
+func waitForWrite(t *testing.T, writes <-chan string, timeout time.Duration) string {
+	t.Helper()
+	select {
+	case payload := <-writes:
+		return payload
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for write")
+		return ""
+	}
 }
 
 func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool) {
