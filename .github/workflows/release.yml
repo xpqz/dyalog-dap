@@ -78,3 +78,33 @@ PY
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate release artifact metadata
+        run: |
+          set -euo pipefail
+
+          if [ ! -s dist/checksums.txt ]; then
+            echo "::error::dist/checksums.txt missing or empty."
+            exit 1
+          fi
+
+          template="docs/releases/release-notes-template.md"
+          if [ ! -f "${template}" ]; then
+            echo "::error::${template} missing."
+            exit 1
+          fi
+
+          if ! grep -qi "installation" "${template}"; then
+            echo "::error::${template} must include installation section."
+            exit 1
+          fi
+
+          if ! grep -qi "checksums" "${template}"; then
+            echo "::error::${template} must include checksums section."
+            exit 1
+          fi
+
+          if ! grep -Eqi '\[[^]]*install[^]]*\]\([^)]+\)' "${template}"; then
+            echo "::error::${template} must include an install instructions link."
+            exit 1
+          fi
