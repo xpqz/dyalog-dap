@@ -92,6 +92,11 @@ type Server struct {
 	threadOrder        []int
 	siDescriptions     map[int][]string
 	tracerOrder        []int
+	sourceByToken      map[int]sourceBinding
+	tokenBySourceRef   map[int]int
+	sourceRefByPath    map[string]int
+	pathBySourceRef    map[int]string
+	nextSourceRef      int
 	syntheticThreadIDs map[string]int
 	nextSyntheticID    int
 	pauseFallback      func() error
@@ -107,6 +112,12 @@ type tracerWindowState struct {
 	name     string
 	line     int
 	column   int
+}
+
+type sourceBinding struct {
+	path        string
+	sourceRef   int
+	displayName string
 }
 
 // StoppedEventBody is emitted for DAP stopped events synthesized from RIDE lifecycle signals.
@@ -138,6 +149,11 @@ func NewServer() *Server {
 		threadOrder:        nil,
 		siDescriptions:     map[int][]string{},
 		tracerOrder:        nil,
+		sourceByToken:      map[int]sourceBinding{},
+		tokenBySourceRef:   map[int]int{},
+		sourceRefByPath:    map[string]int{},
+		pathBySourceRef:    map[int]string{},
+		nextSourceRef:      1,
 		syntheticThreadIDs: map[string]int{},
 		nextSyntheticID:    1000000,
 	}
@@ -163,6 +179,25 @@ func (s *Server) SetPauseFallback(fallback func() error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pauseFallback = fallback
+}
+
+// ResolveSourceReferenceForToken returns the DAP source reference bound to a RIDE token.
+func (s *Server) ResolveSourceReferenceForToken(token int) (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	binding, ok := s.sourceByToken[token]
+	if !ok {
+		return 0, false
+	}
+	return binding.sourceRef, true
+}
+
+// ResolveTokenForSourceReference returns the active RIDE token bound to a DAP source reference.
+func (s *Server) ResolveTokenForSourceReference(sourceRef int) (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	token, ok := s.tokenBySourceRef[sourceRef]
+	return token, ok
 }
 
 // HandleRequest processes initialize/launch/attach/lifecycle skeleton requests.
@@ -321,6 +356,25 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 		}
 		s.updateThreadCache(reply)
 		return nil
+
+	case "UpdateWindow":
+		window, ok := extractWindowContent(decoded.Args)
+		if !ok {
+			return nil
+		}
+		s.bindTokenToSource(window.Token, window.Filename, window.Name)
+		if window.Debugger {
+			s.updateTracerWindow(window)
+		}
+		return nil
+
+	case "CloseWindow":
+		windowArgs, ok := extractWindowArgs(decoded.Args)
+		if !ok {
+			return nil
+		}
+		s.unbindToken(windowArgs.Win)
+		return nil
 	case "ReplyGetSIStack":
 		reply, ok := extractReplyGetSIStack(decoded.Args)
 		if !ok {
@@ -335,29 +389,18 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 
 	case "OpenWindow":
 		window, ok := extractWindowContent(decoded.Args)
-		if !ok || !window.Debugger {
+		if !ok {
+			return nil
+		}
+		s.bindTokenToSource(window.Token, window.Filename, window.Name)
+		if !window.Debugger {
 			return nil
 		}
 
-		windowState := tracerWindowState{}
-		if prior, exists := s.tracerWindows[window.Token]; exists {
-			windowState = prior
-		}
-		if window.Tid > 0 {
-			windowState.threadID = window.Tid
-		}
-		if window.Name != "" {
-			windowState.name = window.Name
-		}
-		windowState.line = window.CurrentRow
-		windowState.column = window.CurrentColumn
-
-		if _, exists := s.tracerWindows[window.Token]; !exists {
-			s.tracerOrder = append(s.tracerOrder, window.Token)
-		}
-		s.tracerWindows[window.Token] = windowState
+		s.updateTracerWindow(window)
 		s.activeTracerWindow = window.Token
 		s.activeTracerSet = true
+		windowState := s.tracerWindows[window.Token]
 		if windowState.threadID > 0 {
 			s.activeThreadID = windowState.threadID
 			s.activeThreadSet = true
@@ -472,6 +515,87 @@ func (s *Server) snapshotThreads() []Thread {
 	return threads
 }
 
+func (s *Server) bindTokenToSource(token int, path, displayName string) {
+	if token <= 0 || path == "" {
+		return
+	}
+	if existing, ok := s.sourceByToken[token]; ok {
+		if mappedToken, ok := s.tokenBySourceRef[existing.sourceRef]; ok && mappedToken == token {
+			delete(s.tokenBySourceRef, existing.sourceRef)
+		}
+	}
+
+	sourceRef, ok := s.sourceRefByPath[path]
+	if !ok {
+		sourceRef = s.nextSourceRef
+		s.nextSourceRef++
+		s.sourceRefByPath[path] = sourceRef
+		s.pathBySourceRef[sourceRef] = path
+	}
+
+	s.sourceByToken[token] = sourceBinding{
+		path:        path,
+		sourceRef:   sourceRef,
+		displayName: displayName,
+	}
+
+	if existingToken, exists := s.tokenBySourceRef[sourceRef]; exists && existingToken != token {
+		delete(s.sourceByToken, existingToken)
+	}
+	s.tokenBySourceRef[sourceRef] = token
+}
+
+func (s *Server) unbindToken(token int) {
+	if token <= 0 {
+		return
+	}
+	if binding, ok := s.sourceByToken[token]; ok {
+		if mappedToken, mapped := s.tokenBySourceRef[binding.sourceRef]; mapped && mappedToken == token {
+			delete(s.tokenBySourceRef, binding.sourceRef)
+		}
+		delete(s.sourceByToken, token)
+	}
+
+	if _, ok := s.tracerWindows[token]; ok {
+		delete(s.tracerWindows, token)
+		s.removeTracerToken(token)
+		if s.activeTracerSet && s.activeTracerWindow == token {
+			s.activeTracerSet = false
+		}
+	}
+}
+
+func (s *Server) updateTracerWindow(window protocol.WindowContentArgs) {
+	windowState := tracerWindowState{}
+	if prior, exists := s.tracerWindows[window.Token]; exists {
+		windowState = prior
+	}
+	if window.Tid > 0 {
+		windowState.threadID = window.Tid
+	}
+	if window.Name != "" {
+		windowState.name = window.Name
+	}
+	windowState.line = window.CurrentRow
+	windowState.column = window.CurrentColumn
+
+	if _, exists := s.tracerWindows[window.Token]; !exists {
+		s.tracerOrder = append(s.tracerOrder, window.Token)
+	}
+	s.tracerWindows[window.Token] = windowState
+}
+
+func (s *Server) removeTracerToken(token int) {
+	filtered := s.tracerOrder[:0]
+	for _, current := range s.tracerOrder {
+		if current == token {
+			continue
+		}
+		filtered = append(filtered, current)
+	}
+	s.tracerOrder = filtered
+}
+
 func (s *Server) buildStackFramesForThread(threadID int) []StackFrame {
 	frames := make([]StackFrame, 0)
 
@@ -543,12 +667,29 @@ func extractWindowContent(args any) (protocol.WindowContentArgs, bool) {
 		return v, true
 	case map[string]any:
 		return protocol.WindowContentArgs{
-			Token:    intFromAny(v["token"]),
-			Debugger: boolFromAny(v["debugger"]),
-			Tid:      intFromAny(v["tid"]),
+			Token:         intFromAny(v["token"]),
+			Filename:      stringFromAny(v["filename"]),
+			Name:          stringFromAny(v["name"]),
+			Debugger:      boolFromAny(v["debugger"]),
+			Tid:           intFromAny(v["tid"]),
+			CurrentRow:    intFromAny(v["currentRow"]),
+			CurrentColumn: intFromAny(v["currentColumn"]),
 		}, true
 	default:
 		return protocol.WindowContentArgs{}, false
+	}
+}
+
+func extractWindowArgs(args any) (protocol.WindowArgs, bool) {
+	switch v := args.(type) {
+	case protocol.WindowArgs:
+		return v, true
+	case map[string]any:
+		return protocol.WindowArgs{
+			Win: intFromAny(v["win"]),
+		}, true
+	default:
+		return protocol.WindowArgs{}, false
 	}
 }
 

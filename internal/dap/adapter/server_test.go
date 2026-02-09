@@ -622,3 +622,183 @@ func TestHandleRequest_StackTraceWithoutThreadIDFails(t *testing.T) {
 		t.Fatal("expected stackTrace without threadId to fail")
 	}
 }
+
+func TestHandleRidePayload_OpenWindowRegistersSourceReferenceAndToken(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    301,
+			Filename: "/ws/src/foo.apl",
+			Name:     "foo",
+		},
+	})
+
+	sourceRef, ok := server.ResolveSourceReferenceForToken(301)
+	if !ok {
+		t.Fatal("expected source reference for token 301")
+	}
+	if sourceRef <= 0 {
+		t.Fatalf("expected positive sourceRef, got %d", sourceRef)
+	}
+
+	token, ok := server.ResolveTokenForSourceReference(sourceRef)
+	if !ok || token != 301 {
+		t.Fatalf("expected sourceRef %d to resolve to token 301, got %d (ok=%v)", sourceRef, token, ok)
+	}
+}
+
+func TestHandleRidePayload_CloseWindowRemovesTokenMapping(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    302,
+			Filename: "/ws/src/bar.apl",
+		},
+	})
+	sourceRef, ok := server.ResolveSourceReferenceForToken(302)
+	if !ok {
+		t.Fatal("expected source ref for open window")
+	}
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "CloseWindow",
+		Args: protocol.WindowArgs{
+			Win: 302,
+		},
+	})
+
+	if _, ok := server.ResolveSourceReferenceForToken(302); ok {
+		t.Fatal("expected token mapping removed after close")
+	}
+	if _, ok := server.ResolveTokenForSourceReference(sourceRef); ok {
+		t.Fatal("expected sourceRef token mapping removed after close")
+	}
+}
+
+func TestHandleRidePayload_ReopenSameSourceReusesSourceReference(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    303,
+			Filename: "/ws/src/baz.apl",
+		},
+	})
+	firstRef, ok := server.ResolveSourceReferenceForToken(303)
+	if !ok {
+		t.Fatal("expected first source ref")
+	}
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "CloseWindow",
+		Args: protocol.WindowArgs{
+			Win: 303,
+		},
+	})
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    304,
+			Filename: "/ws/src/baz.apl",
+		},
+	})
+
+	secondRef, ok := server.ResolveSourceReferenceForToken(304)
+	if !ok {
+		t.Fatal("expected second source ref")
+	}
+	if firstRef != secondRef {
+		t.Fatalf("expected source ref reuse across reopen, got %d then %d", firstRef, secondRef)
+	}
+}
+
+func TestHandleRidePayload_UpdateWindowRebindsTokenToNewSource(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    305,
+			Filename: "/ws/src/old.apl",
+		},
+	})
+	oldRef, ok := server.ResolveSourceReferenceForToken(305)
+	if !ok {
+		t.Fatal("expected old source ref")
+	}
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "UpdateWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    305,
+			Filename: "/ws/src/new.apl",
+		},
+	})
+
+	newRef, ok := server.ResolveSourceReferenceForToken(305)
+	if !ok {
+		t.Fatal("expected updated source ref")
+	}
+	if newRef == oldRef {
+		t.Fatal("expected updated source ref to differ after path change")
+	}
+	if _, ok := server.ResolveTokenForSourceReference(oldRef); ok {
+		t.Fatal("expected old source ref to be unbound from token")
+	}
+	token, ok := server.ResolveTokenForSourceReference(newRef)
+	if !ok || token != 305 {
+		t.Fatalf("expected new sourceRef to map to token 305, got %d (ok=%v)", token, ok)
+	}
+}
+
+func TestHandleRidePayload_RebindingPathToNewTokenUnbindsOldToken(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    306,
+			Filename: "/ws/src/shared.apl",
+		},
+	})
+	ref, ok := server.ResolveSourceReferenceForToken(306)
+	if !ok {
+		t.Fatal("expected source ref for first token")
+	}
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    307,
+			Filename: "/ws/src/shared.apl",
+		},
+	})
+
+	if _, ok := server.ResolveSourceReferenceForToken(306); ok {
+		t.Fatal("expected first token to be unbound after rebind")
+	}
+	token, ok := server.ResolveTokenForSourceReference(ref)
+	if !ok || token != 307 {
+		t.Fatalf("expected sourceRef to map to token 307, got %d (ok=%v)", token, ok)
+	}
+}
