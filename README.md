@@ -192,6 +192,7 @@ The repository includes a minimal VS Code extension at `vscode-extension/`:
 - contribution schema for `launch`/`attach`
 - adapter executable resolution (launch.json `adapterPath`, `DYALOG_DAP_ADAPTER_PATH`, workspace fallbacks)
 - guided commands for setup/validation (`Setup Launch Configuration`, `Validate Adapter Path`, `Validate RIDE Address`)
+- support command: `Generate Diagnostic Bundle` (writes redacted bundle JSON to `.dyalog-dap/support/`)
 - dedicated `Dyalog DAP` output channel with optional verbose diagnostics toggle
 
 Example debug configuration:
@@ -282,6 +283,7 @@ go test ./internal/integration/harness -run '^TestLiveDyalog_' -count=1 -v
 ```
 
 Transcripts are written under `artifacts/integration/` by default.
+Support triage workflow and bundle handling: `docs/support/triage.md`.
 
 ## Troubleshooting
 

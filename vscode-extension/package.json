@@ -20,7 +20,8 @@
     "onCommand:dyalogDap.setupLaunchConfig",
     "onCommand:dyalogDap.validateAdapterPath",
     "onCommand:dyalogDap.validateRideAddr",
-    "onCommand:dyalogDap.toggleDiagnosticsVerbose"
+    "onCommand:dyalogDap.toggleDiagnosticsVerbose",
+    "onCommand:dyalogDap.generateDiagnosticBundle"
   ],
   "main": "./out/extension.js",
   "files": [
@@ -60,6 +61,10 @@
       {
         "command": "dyalogDap.toggleDiagnosticsVerbose",
         "title": "Dyalog DAP: Toggle Verbose Diagnostics"
+      },
+      {
+        "command": "dyalogDap.generateDiagnosticBundle",
+        "title": "Dyalog DAP: Generate Diagnostic Bundle"
       }
     ],
     "configuration": {

@@ -588,3 +588,70 @@ func TestScaffold_HasLiveCompatibilityMatrixPolicyAndReleaseGate(t *testing.T) {
 		}
 	}
 }
+
+func TestScaffold_HasDiagnosticBundleWorkflowAndTriageDocs(t *testing.T) {
+	data, err := os.ReadFile("vscode-extension/package.json")
+	if err != nil {
+		t.Fatalf("missing vscode-extension/package.json: %v", err)
+	}
+	var pkg struct {
+		ActivationEvents []string `json:"activationEvents"`
+		Contributes      struct {
+			Commands []struct {
+				Command string `json:"command"`
+				Title   string `json:"title"`
+			} `json:"commands"`
+		} `json:"contributes"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		t.Fatalf("vscode-extension/package.json is not valid JSON: %v", err)
+	}
+
+	commandID := "dyalogDap.generateDiagnosticBundle"
+	foundCommand := false
+	for _, command := range pkg.Contributes.Commands {
+		if command.Command == commandID && strings.TrimSpace(command.Title) != "" {
+			foundCommand = true
+			break
+		}
+	}
+	if !foundCommand {
+		t.Fatalf("expected contributes.commands entry for %q", commandID)
+	}
+
+	activationEvent := "onCommand:" + commandID
+	foundActivation := false
+	for _, event := range pkg.ActivationEvents {
+		if event == activationEvent {
+			foundActivation = true
+			break
+		}
+	}
+	if !foundActivation {
+		t.Fatalf("expected activation event %q", activationEvent)
+	}
+
+	if _, err := os.Stat("vscode-extension/src/diagnosticsBundle.ts"); err != nil {
+		t.Fatalf("missing vscode-extension/src/diagnosticsBundle.ts: %v", err)
+	}
+	if _, err := os.Stat("vscode-extension/src/test/diagnosticsBundle.test.ts"); err != nil {
+		t.Fatalf("missing vscode-extension/src/test/diagnosticsBundle.test.ts: %v", err)
+	}
+
+	triage, err := os.ReadFile("docs/support/triage.md")
+	if err != nil {
+		t.Fatalf("missing docs/support/triage.md: %v", err)
+	}
+	triageText := string(triage)
+	requiredTriageSnippets := []string{
+		"diagnostic bundle",
+		"redact",
+		"first-pass",
+		"artifacts",
+	}
+	for _, snippet := range requiredTriageSnippets {
+		if !strings.Contains(strings.ToLower(triageText), strings.ToLower(snippet)) {
+			t.Fatalf("expected support triage doc to contain %q", snippet)
+		}
+	}
+}
