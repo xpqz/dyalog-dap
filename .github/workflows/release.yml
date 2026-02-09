@@ -38,18 +38,18 @@ jobs:
           fi
 
           python - <<'PY' "${latest_success}" "${LIVE_MATRIX_MAX_AGE_DAYS}"
-import datetime
-import sys
+          import datetime
+          import sys
 
-latest = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
-max_age_days = int(sys.argv[2])
-now = datetime.datetime.now(datetime.timezone.utc)
-age_days = (now - latest).days
-if age_days > max_age_days:
-    print(f"::error::Latest successful live matrix run is {age_days} days old (limit {max_age_days}).")
-    raise SystemExit(1)
-print(f"Live matrix freshness check passed ({age_days} days old, limit {max_age_days}).")
-PY
+          latest = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+          max_age_days = int(sys.argv[2])
+          now = datetime.datetime.now(datetime.timezone.utc)
+          age_days = (now - latest).days
+          if age_days > max_age_days:
+              print(f"::error::Latest successful live matrix run is {age_days} days old (limit {max_age_days}).")
+              raise SystemExit(1)
+          print(f"Live matrix freshness check passed ({age_days} days old, limit {max_age_days}).")
+          PY
 
   goreleaser:
     needs:
