@@ -219,6 +219,13 @@ export DYALOG_RIDE_CONNECT_TIMEOUT=10s
 go test ./internal/integration/harness -run '^TestLiveDyalog_' -count=1 -v
 ```
 
+Live stdio adapter smoke (real DAP process boundary):
+
+```bash
+export DYALOG_RIDE_ADDR=127.0.0.1:4502
+go test ./cmd/dap-adapter -run '^TestLiveDAPAdapter_' -count=1 -v
+```
+
 Connect-only mode (if Dyalog is already running):
 
 ```bash
@@ -286,7 +293,7 @@ Workflow file: `.github/workflows/ci.yml`
 
 - `critical-gate`: Go matrix on core packages
 - `full-suite`: `go test ./...` and `go vet ./...` after critical gate
-- `live-dyalog`: optional, runs only when `DYALOG_RIDE_ADDR` is configured in CI; executes `TestLiveDyalog_*` only
+- `live-dyalog`: optional, runs only when `DYALOG_RIDE_ADDR` is configured in CI; executes `TestLiveDyalog_*` and `TestLiveDAPAdapter_*`
 
 ## Architecture Overview
 

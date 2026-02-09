@@ -54,4 +54,6 @@ jobs:
         with:
           go-version: "1.23.x"
       - name: Run live harness smoke (when endpoint is configured)
-        run: go test ./internal/integration/harness -run '^TestLiveDyalog_' -count=1 -v
+        run: |
+          go test ./internal/integration/harness -run '^TestLiveDyalog_' -count=1 -v
+          go test ./cmd/dap-adapter -run '^TestLiveDAPAdapter_' -count=1 -v

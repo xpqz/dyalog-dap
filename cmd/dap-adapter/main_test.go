@@ -189,6 +189,21 @@ func TestRun_LaunchAndControlRoundTripAgainstRide(t *testing.T) {
 			return
 		}
 
+		continuePayload, err := rideReadFrame(conn)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		continueCommand, err := rideDecodeCommandName(continuePayload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if continueCommand != "Continue" {
+			serverErr <- fmt.Errorf("expected Continue, got %q", continueCommand)
+			return
+		}
+
 		serverErr <- nil
 	}()
 
@@ -282,8 +297,18 @@ func TestRun_LaunchAndControlRoundTripAgainstRide(t *testing.T) {
 		t.Fatalf("setBreakpoints response failed: %#v", breakpointsResp)
 	}
 
-	writeReq(8, "disconnect", nil)
+	writeReq(8, "configurationDone", nil)
 	if ok, _ := waitForResponse(t, msgs, 8)["success"].(bool); !ok {
+		t.Fatal("configurationDone response was not successful")
+	}
+
+	writeReq(9, "continue", nil)
+	if ok, _ := waitForResponse(t, msgs, 9)["success"].(bool); !ok {
+		t.Fatal("continue response was not successful")
+	}
+
+	writeReq(10, "disconnect", nil)
+	if ok, _ := waitForResponse(t, msgs, 10)["success"].(bool); !ok {
 		t.Fatal("disconnect response was not successful")
 	}
 	_ = inW.Close()
