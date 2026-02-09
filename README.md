@@ -11,7 +11,8 @@ Current status (as of February 9, 2026):
 - The `dap-adapter` binary is now a long-running stdio DAP server.
 - Core phase-1 debug commands are wired: initialize, launch/attach, threads, stackTrace, continue/step/pause, setBreakpoints.
 - Live Dyalog smoke coverage is in CI and local tests.
-- This repository does not yet ship a standalone VS Code extension package, so you need a DAP client/extension configuration that can launch an external adapter command.
+- A minimal VS Code debugger extension is included under `vscode-extension/` (debug type: `dyalog-dap`).
+- A published VSIX/Marketplace release is not yet shipped from this repository.
 
 Quick start right now:
 
@@ -29,6 +30,8 @@ DYALOG_RIDE_ADDR=127.0.0.1:4502 ./dap-adapter
 ```
 
 3. Point your DAP client to that adapter process and send `initialize` then `launch` (or `attach`).
+
+4. For VS Code, use the bundled extension source in `vscode-extension/` (Extension Development Host) and a `launch.json` config using `"type": "dyalog-dap"`.
 
 Supported launch/attach arguments:
 
@@ -163,6 +166,33 @@ Smoke flow in this repo:
 3. Start launch config `Harness Integration Smoke`.
 
 For real interactive debugging UI, use a VS Code DAP client/extension setup that launches `dap-adapter` and sends `launch`/`attach` with `rideAddr`.
+
+### Bundled extension (minimal)
+
+The repository includes a minimal VS Code extension at `vscode-extension/`:
+
+- debug type: `dyalog-dap`
+- contribution schema for `launch`/`attach`
+- adapter executable resolution (launch.json `adapterPath`, `DYALOG_DAP_ADAPTER_PATH`, workspace fallbacks)
+
+Example debug configuration:
+
+```json
+{
+  "name": "Dyalog: Launch (RIDE)",
+  "type": "dyalog-dap",
+  "request": "launch",
+  "rideAddr": "127.0.0.1:4502",
+  "adapterPath": "${workspaceFolder}/dap-adapter"
+}
+```
+
+To try it quickly:
+
+1. Build adapter binary at repo root: `go build ./cmd/dap-adapter`
+2. Open `vscode-extension/` in VS Code
+3. Press `F5` to launch an Extension Development Host
+4. In the Extension Host, use the above `launch.json` configuration
 
 ## Live Dyalog Integration Harness
 
@@ -306,7 +336,7 @@ Workflow file: `.github/workflows/ci.yml`
 
 ## Known Limitations
 
-- No packaged VS Code extension is included in this repository yet.
+- No published VSIX/Marketplace package is included yet (extension source exists under `vscode-extension/`).
 - Some integration scenarios are fake-server deterministic flows
 - Live interpreter matrix coverage depends on environment availability
 - Prompt-mode semantics vary across interpreter/version combinations and are tracked as explicit open items

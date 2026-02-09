@@ -1,0 +1,147 @@
+{
+  "name": "dyalog-dap",
+  "displayName": "Dyalog DAP",
+  "description": "Minimal VS Code debugger integration for the dyalog-dap adapter.",
+  "version": "0.0.1",
+  "publisher": "xpqz",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Debuggers"
+  ],
+  "activationEvents": [
+    "onDebug:dyalog-dap"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "debuggers": [
+      {
+        "type": "dyalog-dap",
+        "label": "Dyalog DAP",
+        "languages": [
+          "apl"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "rideAddr"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "default": "Dyalog: Launch (RIDE)"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "dyalog-dap"
+                ]
+              },
+              "request": {
+                "type": "string",
+                "enum": [
+                  "launch"
+                ]
+              },
+              "rideAddr": {
+                "type": "string",
+                "description": "RIDE endpoint host:port (for example 127.0.0.1:4502)."
+              },
+              "rideLaunchCommand": {
+                "type": "string",
+                "description": "Optional shell command to launch Dyalog (adapter sends this to harness)."
+              },
+              "rideConnectTimeout": {
+                "type": "string",
+                "description": "Optional Go duration string (for example 10s)."
+              },
+              "rideConnectTimeoutMs": {
+                "type": "number",
+                "description": "Optional connect timeout in milliseconds."
+              },
+              "rideTranscriptsDir": {
+                "type": "string",
+                "description": "Optional protocol transcript output directory."
+              },
+              "dyalogBin": {
+                "type": "string",
+                "description": "Optional Dyalog executable path used to derive launch command."
+              },
+              "adapterPath": {
+                "type": "string",
+                "description": "Optional path to dap-adapter executable."
+              },
+              "adapterArgs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Optional command-line args passed to dap-adapter."
+              },
+              "adapterEnv": {
+                "type": "object",
+                "description": "Optional environment variables passed to dap-adapter."
+              }
+            }
+          },
+          "attach": {
+            "required": [
+              "rideAddr"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "default": "Dyalog: Attach (RIDE)"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "dyalog-dap"
+                ]
+              },
+              "request": {
+                "type": "string",
+                "enum": [
+                  "attach"
+                ]
+              },
+              "rideAddr": {
+                "type": "string",
+                "description": "RIDE endpoint host:port (for example 127.0.0.1:4502)."
+              },
+              "adapterPath": {
+                "type": "string",
+                "description": "Optional path to dap-adapter executable."
+              },
+              "adapterArgs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Optional command-line args passed to dap-adapter."
+              },
+              "adapterEnv": {
+                "type": "object",
+                "description": "Optional environment variables passed to dap-adapter."
+              }
+            }
+          }
+        },
+        "configurationSnippets": [
+          {
+            "label": "Dyalog DAP: Launch",
+            "description": "Launch debugging against a RIDE endpoint.",
+            "body": {
+              "name": "Dyalog: Launch (RIDE)",
+              "type": "dyalog-dap",
+              "request": "launch",
+              "rideAddr": "127.0.0.1:4502",
+              "adapterPath": "${workspaceFolder}/dap-adapter"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

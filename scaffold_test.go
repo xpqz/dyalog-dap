@@ -176,3 +176,63 @@ func TestScaffold_HasReleaseWorkflow(t *testing.T) {
 		}
 	}
 }
+
+func TestScaffold_HasVSCodeExtensionDebuggerContribution(t *testing.T) {
+	data, err := os.ReadFile("vscode-extension/package.json")
+	if err != nil {
+		t.Fatalf("missing vscode-extension/package.json: %v", err)
+	}
+
+	var pkg struct {
+		Main         string `json:"main"`
+		Engines      struct {
+			VSCode string `json:"vscode"`
+		} `json:"engines"`
+		ActivationEvents []string `json:"activationEvents"`
+		Contributes      struct {
+			Debuggers []struct {
+				Type    string `json:"type"`
+				Label   string `json:"label"`
+				Program string `json:"program"`
+			} `json:"debuggers"`
+		} `json:"contributes"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		t.Fatalf("vscode-extension/package.json is not valid JSON: %v", err)
+	}
+
+	if pkg.Main == "" {
+		t.Fatal("expected extension main entry in vscode-extension/package.json")
+	}
+	if pkg.Engines.VSCode == "" {
+		t.Fatal("expected engines.vscode in vscode-extension/package.json")
+	}
+
+	hasActivation := false
+	for _, event := range pkg.ActivationEvents {
+		if event == "onDebug:dyalog-dap" {
+			hasActivation = true
+			break
+		}
+	}
+	if !hasActivation {
+		t.Fatal("expected activation event onDebug:dyalog-dap")
+	}
+
+	hasDebugger := false
+	for _, debugger := range pkg.Contributes.Debuggers {
+		if debugger.Type == "dyalog-dap" && debugger.Label != "" {
+			hasDebugger = true
+			break
+		}
+	}
+	if !hasDebugger {
+		t.Fatal("expected debugger contribution for type dyalog-dap")
+	}
+}
+
+func TestScaffold_HasVSCodeExtensionEntrypoint(t *testing.T) {
+	if _, err := os.Stat("vscode-extension/out/extension.js"); err != nil {
+		t.Fatalf("missing vscode-extension/out/extension.js: %v", err)
+	}
+}
