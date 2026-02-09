@@ -415,6 +415,101 @@ func TestRun_LaunchBeforeInitializeDoesNotStartRideRuntime(t *testing.T) {
 	}
 }
 
+func TestRun_DisconnectDoesNotHangWhenRideConnectionStaysOpen(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+
+	serverErr := make(chan error, 1)
+	serverDone := make(chan struct{})
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+
+		if err := rideHandshake(conn); err != nil {
+			serverErr <- err
+			return
+		}
+
+		<-serverDone
+		serverErr <- nil
+	}()
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- run(context.Background(), inR, outW, io.Discard)
+		_ = outW.Close()
+	}()
+
+	decoderErr := make(chan error, 1)
+	msgs := make(chan map[string]any, 64)
+	go func() {
+		defer close(msgs)
+		decoderErr <- decodeDAPStream(outR, msgs)
+	}()
+
+	writeReq := func(seq int, command string, args map[string]any) {
+		t.Helper()
+		req := map[string]any{
+			"seq":     seq,
+			"type":    "request",
+			"command": command,
+		}
+		if args != nil {
+			req["arguments"] = args
+		}
+		if err := writeDAPFrame(inW, req); err != nil {
+			t.Fatalf("write %s failed: %v", command, err)
+		}
+	}
+
+	writeReq(1, "initialize", map[string]any{"adapterID": "dyalog-dap"})
+	if ok, _ := waitForResponse(t, msgs, 1)["success"].(bool); !ok {
+		t.Fatal("initialize response was not successful")
+	}
+	waitForEvent(t, msgs, "initialized")
+
+	writeReq(2, "launch", map[string]any{
+		"rideAddr":           ln.Addr().String(),
+		"rideTranscriptsDir": t.TempDir(),
+	})
+	if ok, _ := waitForResponse(t, msgs, 2)["success"].(bool); !ok {
+		t.Fatal("launch response was not successful")
+	}
+
+	writeReq(3, "disconnect", nil)
+	if ok, _ := waitForResponse(t, msgs, 3)["success"].(bool); !ok {
+		t.Fatal("disconnect response was not successful")
+	}
+	_ = inW.Close()
+
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("run returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for run to stop while RIDE connection remained open")
+	}
+
+	close(serverDone)
+	if err := <-serverErr; err != nil {
+		t.Fatalf("fake RIDE server error: %v", err)
+	}
+	if err := <-decoderErr; err != nil {
+		t.Fatalf("decode stream failed: %v", err)
+	}
+}
+
 func waitForResponse(t *testing.T, msgs <-chan map[string]any, seq int) map[string]any {
 	t.Helper()
 	deadline := time.After(3 * time.Second)
@@ -611,5 +706,29 @@ func asInt(value any) (int, bool) {
 		return int(typed), true
 	default:
 		return 0, false
+	}
+}
+
+func TestRuntimeConfigFrom_AttachClearsEnvLaunchCommand(t *testing.T) {
+	t.Setenv("DYALOG_RIDE_ADDR", "127.0.0.1:4502")
+	t.Setenv("DYALOG_RIDE_LAUNCH", "RIDE_INIT=SERVE:*:4502 dyalog +s -q")
+
+	cfg, err := runtimeConfigFrom("attach", nil)
+	if err != nil {
+		t.Fatalf("runtimeConfigFrom attach failed: %v", err)
+	}
+	if cfg.LaunchCommand != "" {
+		t.Fatalf("expected attach config to clear launch command ownership, got %q", cfg.LaunchCommand)
+	}
+}
+
+func TestRuntimeConfigFrom_AttachRejectsExplicitLaunchSettings(t *testing.T) {
+	t.Setenv("DYALOG_RIDE_ADDR", "127.0.0.1:4502")
+
+	_, err := runtimeConfigFrom("attach", map[string]any{
+		"rideLaunchCommand": "RIDE_INIT=SERVE:*:4502 dyalog +s -q",
+	})
+	if err == nil {
+		t.Fatal("expected attach with rideLaunchCommand to fail ownership policy")
 	}
 }

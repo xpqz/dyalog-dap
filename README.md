@@ -33,14 +33,19 @@ DYALOG_RIDE_ADDR=127.0.0.1:4502 ./dap-adapter
 
 4. For VS Code, use the bundled extension source in `vscode-extension/` (Extension Development Host) and a `launch.json` config using `"type": "dyalog-dap"`.
 
-Supported launch/attach arguments:
+Supported `launch`/`attach` arguments:
 
-- `rideAddr` (example `127.0.0.1:4502`)
-- `rideLaunchCommand` (optional, adapter launches Dyalog)
-- `rideConnectTimeout` (optional, duration string, example `10s`)
-- `rideConnectTimeoutMs` (optional integer milliseconds)
-- `rideTranscriptsDir` (optional transcript output directory)
-- `dyalogBin` (optional executable path; adapter derives `RIDE_INIT=SERVE:*:<port> ... +s -q`)
+- shared:
+  - `rideAddr` (example `127.0.0.1:4502`)
+  - `rideConnectTimeout` (optional, duration string, example `10s`)
+  - `rideConnectTimeoutMs` (optional integer milliseconds)
+  - `rideTranscriptsDir` (optional transcript output directory)
+- `launch` only (adapter-owned interpreter lifecycle):
+  - `rideLaunchCommand` (optional, adapter launches Dyalog)
+  - `dyalogBin` (optional executable path; adapter derives `RIDE_INIT=SERVE:*:<port> ... +s -q`)
+- `attach` policy:
+  - connect-only; launch settings are not accepted
+  - any `rideLaunchCommand`/`rideLaunch`/`dyalogBin` in `attach` will fail fast
 
 ## Getting Started in 5 Minutes
 
@@ -271,6 +276,11 @@ pkill -f dyalog
 ### DAP `launch` or `attach` fails with missing ride address
 
 - Provide `rideAddr` in launch/attach arguments, or set `DYALOG_RIDE_ADDR` before starting `dap-adapter`.
+
+### DAP `attach` fails when launch settings are provided
+
+- `attach` is now explicit connect-only mode and does not allow adapter-owned process launch.
+- Remove `rideLaunchCommand`/`rideLaunch`/`dyalogBin` from `attach`, or switch request type to `launch`.
 
 ### Live smoke test is skipped
 

@@ -19,6 +19,8 @@ import (
 	"github.com/stefan/lsp-dap/internal/ride/sessionstate"
 )
 
+const runtimeStopWaitTimeout = 3 * time.Second
+
 func main() {
 	if err := run(context.Background(), os.Stdin, os.Stdout, os.Stderr); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "dap-adapter: %v\n", err)
@@ -59,7 +61,7 @@ func run(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Write
 		if (request.Command == "launch" || request.Command == "attach") &&
 			server.CanLaunchOrAttach() &&
 			!runtime.started() {
-			if err := runtime.start(ctx, request.Arguments); err != nil {
+			if err := runtime.start(ctx, request.Command, request.Arguments); err != nil {
 				response := adapter.Response{
 					RequestSeq: request.Seq,
 					Command:    request.Command,
@@ -191,7 +193,7 @@ func (r *rideRuntime) started() bool {
 	return r.dispatcher != nil
 }
 
-func (r *rideRuntime) start(ctx context.Context, args any) error {
+func (r *rideRuntime) start(ctx context.Context, requestCommand string, args any) error {
 	r.mu.Lock()
 	if r.dispatcher != nil {
 		r.mu.Unlock()
@@ -199,7 +201,7 @@ func (r *rideRuntime) start(ctx context.Context, args any) error {
 	}
 	r.mu.Unlock()
 
-	cfg, err := runtimeConfigFrom(args)
+	cfg, err := runtimeConfigFrom(requestCommand, args)
 	if err != nil {
 		return err
 	}
@@ -271,29 +273,53 @@ func (r *rideRuntime) stop() error {
 	r.server.SetRideController(nil)
 	r.mu.Unlock()
 
+	var errs []error
+
 	if unsubscribe != nil {
 		unsubscribe()
+	}
+	if h != nil {
+		if err := h.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close harness: %w", err))
+		}
 	}
 	if cancel != nil {
 		cancel()
 	}
-	if runDone != nil {
-		<-runDone
+	if err := waitForDone(runDone, runtimeStopWaitTimeout, "RIDE dispatcher"); err != nil {
+		errs = append(errs, err)
 	}
-	if bridgeDone != nil {
-		<-bridgeDone
+	if err := waitForDone(bridgeDone, runtimeStopWaitTimeout, "DAP bridge"); err != nil {
+		errs = append(errs, err)
 	}
-	if h != nil {
-		return h.Close()
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 	return nil
 }
 
-func runtimeConfigFrom(arguments any) (harness.Config, error) {
+func waitForDone(done <-chan struct{}, timeout time.Duration, component string) error {
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("timeout waiting for %s shutdown after %s", component, timeout)
+	}
+}
+
+func runtimeConfigFrom(requestCommand string, arguments any) (harness.Config, error) {
 	cfg := harness.ConfigFromEnv()
+	explicitLaunchSetting := false
 
 	argsMap, ok := arguments.(map[string]any)
 	if !ok {
+		if requestCommand == "attach" {
+			cfg.LaunchCommand = ""
+		}
 		if cfg.RideAddr == "" {
 			return cfg, errors.New("launch/attach requires rideAddr (or DYALOG_RIDE_ADDR)")
 		}
@@ -308,9 +334,11 @@ func runtimeConfigFrom(arguments any) (harness.Config, error) {
 	}
 	if launchCommand, ok := getString(argsMap, "rideLaunchCommand"); ok {
 		cfg.LaunchCommand = launchCommand
+		explicitLaunchSetting = true
 	}
 	if launchCommand, ok := getString(argsMap, "rideLaunch"); ok && cfg.LaunchCommand == "" {
 		cfg.LaunchCommand = launchCommand
+		explicitLaunchSetting = true
 	}
 	if transcriptsDir, ok := getString(argsMap, "rideTranscriptsDir"); ok {
 		cfg.TranscriptDir = transcriptsDir
@@ -331,6 +359,15 @@ func runtimeConfigFrom(arguments any) (harness.Config, error) {
 			return cfg, err
 		}
 		cfg.LaunchCommand = command
+		explicitLaunchSetting = true
+	}
+
+	if requestCommand == "attach" {
+		if explicitLaunchSetting {
+			return cfg, errors.New("attach does not support adapter-owned launch; use launch request for rideLaunchCommand/dyalogBin")
+		}
+		// Attach is connect-only and must not inherit process ownership from environment launch settings.
+		cfg.LaunchCommand = ""
 	}
 
 	if cfg.RideAddr == "" {
