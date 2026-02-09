@@ -7,7 +7,53 @@ on:
   workflow_dispatch:
 
 jobs:
+  release-readiness:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      LIVE_MATRIX_REQUIRED: ${{ vars.LIVE_MATRIX_REQUIRED }}
+      LIVE_MATRIX_MAX_AGE_DAYS: ${{ vars.LIVE_MATRIX_MAX_AGE_DAYS }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check release-readiness live matrix signal
+        run: |
+          if [ "${LIVE_MATRIX_REQUIRED}" != "1" ]; then
+            echo "LIVE_MATRIX_REQUIRED is not enabled; skipping live-matrix release gate."
+            exit 0
+          fi
+
+          if [ -z "${LIVE_MATRIX_MAX_AGE_DAYS}" ]; then
+            LIVE_MATRIX_MAX_AGE_DAYS=14
+          fi
+
+          api_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/live-matrix.yml/runs?branch=main&status=completed&per_page=20"
+          json="$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "${api_url}")"
+
+          latest_success="$(echo "${json}" | jq -r '.workflow_runs[] | select(.conclusion=="success") | .run_started_at' | head -n 1)"
+          if [ -z "${latest_success}" ] || [ "${latest_success}" = "null" ]; then
+            echo "::error::No successful live-matrix.yml run found on main."
+            exit 1
+          fi
+
+          python - <<'PY' "${latest_success}" "${LIVE_MATRIX_MAX_AGE_DAYS}"
+import datetime
+import sys
+
+latest = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+max_age_days = int(sys.argv[2])
+now = datetime.datetime.now(datetime.timezone.utc)
+age_days = (now - latest).days
+if age_days > max_age_days:
+    print(f"::error::Latest successful live matrix run is {age_days} days old (limit {max_age_days}).")
+    raise SystemExit(1)
+print(f"Live matrix freshness check passed ({age_days} days old, limit {max_age_days}).")
+PY
+
   goreleaser:
+    needs:
+      - release-readiness
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -345,6 +345,17 @@ Workflow file: `.github/workflows/ci.yml`
 - `full-suite`: `go test ./...` and `go vet ./...` after critical gate
 - `live-dyalog`: optional, runs only when `DYALOG_RIDE_ADDR` is configured in CI; executes `TestLiveDyalog_*` and `TestLiveDAPAdapter_*`
 
+Live compatibility matrix workflow:
+
+- `.github/workflows/live-matrix.yml` (workflow_dispatch + schedule)
+- matrix profiles for Linux/macOS/Windows self-hosted Dyalog variants
+- uploads reliability metrics/artifacts for each profile
+
+Release readiness gate:
+
+- `.github/workflows/release.yml` includes `release-readiness` check against recent successful `live-matrix.yml` runs when `LIVE_MATRIX_REQUIRED=1`.
+- policy details: `docs/validations/55-live-ci-matrix.md`
+
 ## Architecture Overview
 
 ### `internal/ride/transport`

@@ -530,3 +530,61 @@ func TestScaffold_HasLiveInteractiveE2EAutomationAndFlakePolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestScaffold_HasLiveCompatibilityMatrixPolicyAndReleaseGate(t *testing.T) {
+	policy, err := os.ReadFile("docs/validations/55-live-ci-matrix.md")
+	if err != nil {
+		t.Fatalf("missing docs/validations/55-live-ci-matrix.md: %v", err)
+	}
+	policyText := string(policy)
+	requiredPolicySnippets := []string{
+		"# Live CI Matrix Policy",
+		"OS",
+		"Dyalog",
+		"promotion",
+		"self-hosted",
+		"reliability",
+	}
+	for _, snippet := range requiredPolicySnippets {
+		if !strings.Contains(strings.ToLower(policyText), strings.ToLower(snippet)) {
+			t.Fatalf("expected matrix policy to contain %q", snippet)
+		}
+	}
+
+	liveMatrixWorkflow, err := os.ReadFile(".github/workflows/live-matrix.yml")
+	if err != nil {
+		t.Fatalf("missing .github/workflows/live-matrix.yml: %v", err)
+	}
+	liveMatrixText := string(liveMatrixWorkflow)
+	requiredWorkflowSnippets := []string{
+		"name: live-matrix",
+		"workflow_dispatch:",
+		"matrix:",
+		"profile",
+		"linux",
+		"macos",
+		"windows",
+		"self-hosted",
+	}
+	for _, snippet := range requiredWorkflowSnippets {
+		if !strings.Contains(strings.ToLower(liveMatrixText), strings.ToLower(snippet)) {
+			t.Fatalf("expected live matrix workflow to contain %q", snippet)
+		}
+	}
+
+	releaseWorkflow, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatalf("missing .github/workflows/release.yml: %v", err)
+	}
+	releaseText := string(releaseWorkflow)
+	requiredReleaseSnippets := []string{
+		"LIVE_MATRIX_REQUIRED",
+		"live-matrix.yml",
+		"release-readiness",
+	}
+	for _, snippet := range requiredReleaseSnippets {
+		if !strings.Contains(strings.ToLower(releaseText), strings.ToLower(snippet)) {
+			t.Fatalf("expected release workflow to contain %q", snippet)
+		}
+	}
+}

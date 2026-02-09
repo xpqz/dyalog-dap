@@ -1,0 +1,134 @@
+name: live-matrix
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+jobs:
+  live-matrix:
+    name: live-matrix (${{ matrix.profile }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: linux-190
+            runner: '["self-hosted","linux","x64","dyalog-19.0"]'
+          - profile: macos-190
+            runner: '["self-hosted","macos","arm64","dyalog-19.0"]'
+          - profile: windows-190
+            runner: '["self-hosted","windows","x64","dyalog-19.0"]'
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    env:
+      DYALOG_RIDE_ADDR_LINUX_190: ${{ vars.DYALOG_RIDE_ADDR_LINUX_190 }}
+      DYALOG_RIDE_ADDR_MACOS_190: ${{ vars.DYALOG_RIDE_ADDR_MACOS_190 }}
+      DYALOG_RIDE_ADDR_WINDOWS_190: ${{ vars.DYALOG_RIDE_ADDR_WINDOWS_190 }}
+      DYALOG_RIDE_LAUNCH_LINUX_190: ${{ vars.DYALOG_RIDE_LAUNCH_LINUX_190 }}
+      DYALOG_RIDE_LAUNCH_MACOS_190: ${{ vars.DYALOG_RIDE_LAUNCH_MACOS_190 }}
+      DYALOG_RIDE_LAUNCH_WINDOWS_190: ${{ vars.DYALOG_RIDE_LAUNCH_WINDOWS_190 }}
+      DYALOG_BIN_LINUX_190: ${{ vars.DYALOG_BIN_LINUX_190 }}
+      DYALOG_BIN_MACOS_190: ${{ vars.DYALOG_BIN_MACOS_190 }}
+      DYALOG_BIN_WINDOWS_190: ${{ vars.DYALOG_BIN_WINDOWS_190 }}
+      DYALOG_E2E_REQUIRE_LINUX_190: ${{ vars.DYALOG_E2E_REQUIRE_LINUX_190 }}
+      DYALOG_E2E_REQUIRE_MACOS_190: ${{ vars.DYALOG_E2E_REQUIRE_MACOS_190 }}
+      DYALOG_E2E_REQUIRE_WINDOWS_190: ${{ vars.DYALOG_E2E_REQUIRE_WINDOWS_190 }}
+      DYALOG_E2E_TIMEOUT_LINUX_190: ${{ vars.DYALOG_E2E_TIMEOUT_LINUX_190 }}
+      DYALOG_E2E_TIMEOUT_MACOS_190: ${{ vars.DYALOG_E2E_TIMEOUT_MACOS_190 }}
+      DYALOG_E2E_TIMEOUT_WINDOWS_190: ${{ vars.DYALOG_E2E_TIMEOUT_WINDOWS_190 }}
+      MATRIX_PROFILE: ${{ matrix.profile }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+
+      - name: Resolve matrix profile environment
+        shell: pwsh
+        run: |
+          $profile = "${env:MATRIX_PROFILE}"
+          switch ($profile) {
+            "linux-190" {
+              $ride = "${env:DYALOG_RIDE_ADDR_LINUX_190}"
+              $launch = "${env:DYALOG_RIDE_LAUNCH_LINUX_190}"
+              $bin = "${env:DYALOG_BIN_LINUX_190}"
+              $e2e = "${env:DYALOG_E2E_REQUIRE_LINUX_190}"
+              $e2eTimeout = "${env:DYALOG_E2E_TIMEOUT_LINUX_190}"
+            }
+            "macos-190" {
+              $ride = "${env:DYALOG_RIDE_ADDR_MACOS_190}"
+              $launch = "${env:DYALOG_RIDE_LAUNCH_MACOS_190}"
+              $bin = "${env:DYALOG_BIN_MACOS_190}"
+              $e2e = "${env:DYALOG_E2E_REQUIRE_MACOS_190}"
+              $e2eTimeout = "${env:DYALOG_E2E_TIMEOUT_MACOS_190}"
+            }
+            "windows-190" {
+              $ride = "${env:DYALOG_RIDE_ADDR_WINDOWS_190}"
+              $launch = "${env:DYALOG_RIDE_LAUNCH_WINDOWS_190}"
+              $bin = "${env:DYALOG_BIN_WINDOWS_190}"
+              $e2e = "${env:DYALOG_E2E_REQUIRE_WINDOWS_190}"
+              $e2eTimeout = "${env:DYALOG_E2E_TIMEOUT_WINDOWS_190}"
+            }
+            default {
+              throw "Unknown profile: $profile"
+            }
+          }
+
+          if ([string]::IsNullOrWhiteSpace($ride)) {
+            "MATRIX_ENABLED=0" >> $env:GITHUB_ENV
+            Write-Host "Skipping $profile because no DYALOG_RIDE_ADDR was configured."
+            exit 0
+          }
+
+          if ([string]::IsNullOrWhiteSpace($e2e)) {
+            $e2e = "0"
+          }
+
+          "MATRIX_ENABLED=1" >> $env:GITHUB_ENV
+          "DYALOG_RIDE_ADDR=$ride" >> $env:GITHUB_ENV
+          "DYALOG_RIDE_LAUNCH=$launch" >> $env:GITHUB_ENV
+          "DYALOG_BIN=$bin" >> $env:GITHUB_ENV
+          "DYALOG_LIVE_REQUIRE=1" >> $env:GITHUB_ENV
+          "DYALOG_E2E_REQUIRE=$e2e" >> $env:GITHUB_ENV
+          if (-not [string]::IsNullOrWhiteSpace($e2eTimeout)) {
+            "DYALOG_E2E_TIMEOUT=$e2eTimeout" >> $env:GITHUB_ENV
+          }
+
+      - name: Run live matrix tests
+        id: live
+        if: env.MATRIX_ENABLED == '1'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          go test ./internal/integration/harness -run '^TestLiveDyalog_' -count=1 -v
+          go test ./cmd/dap-adapter -run '^TestLiveDAPAdapter_' -count=1 -v
+
+      - name: Write live reliability metrics
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/integration/metrics | Out-Null
+          $outcome = "${{ steps.live.outcome }}"
+          if ($outcome -eq "") { $outcome = "skipped" }
+          $metrics = @{
+            profile = "${env:MATRIX_PROFILE}"
+            matrix_enabled = "${env:MATRIX_ENABLED}"
+            outcome = $outcome
+            run_id = "${{ github.run_id }}"
+            run_attempt = "${{ github.run_attempt }}"
+            timestamp_utc = [DateTime]::UtcNow.ToString("o")
+          } | ConvertTo-Json -Compress
+          Set-Content -Path "artifacts/integration/metrics/${env:MATRIX_PROFILE}.json" -Value $metrics
+
+      - name: Upload live matrix artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-matrix-${{ matrix.profile }}
+          path: artifacts/integration
+          if-no-files-found: ignore
+
+      - name: Enforce live matrix outcome
+        if: env.MATRIX_ENABLED == '1' && steps.live.outcome != 'success'
+        shell: pwsh
+        run: |
+          throw "Live matrix profile ${env:MATRIX_PROFILE} failed."
