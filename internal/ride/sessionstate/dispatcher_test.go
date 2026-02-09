@@ -200,6 +200,159 @@ func TestDispatcher_FlushFailureRequeuesRemainingCommandsInOrder(t *testing.T) {
 	}
 }
 
+func TestDispatcher_CloseWindowWaitsForReplySaveChanges(t *testing.T) {
+	transport := newMockTransport()
+	dispatcher := NewDispatcher(transport, protocol.NewCodec())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		dispatcher.Run(ctx)
+		close(done)
+	}()
+
+	transport.push(`["SetPromptType",{"type":0}]`)
+	waitForCondition(t, 250*time.Millisecond, func() bool {
+		promptType, known := dispatcher.PromptType()
+		return known && promptType == 0
+	})
+
+	if err := dispatcher.SendCommand("SaveChanges", protocol.SaveChangesArgs{
+		Win:  88,
+		Text: []string{"a←1"},
+	}); err != nil {
+		t.Fatalf("SendCommand SaveChanges failed: %v", err)
+	}
+
+	firstWrite := waitForWrite(t, transport.writeCh, 250*time.Millisecond)
+	firstCommand, err := decodeCommandName(firstWrite)
+	if err != nil {
+		t.Fatalf("failed decoding first write: %v", err)
+	}
+	if firstCommand != "SaveChanges" {
+		t.Fatalf("expected first write SaveChanges, got %q", firstCommand)
+	}
+
+	if err := dispatcher.SendCommand("CloseWindow", protocol.WindowArgs{Win: 88}); err != nil {
+		t.Fatalf("SendCommand CloseWindow failed: %v", err)
+	}
+
+	select {
+	case payload := <-transport.writeCh:
+		command, err := decodeCommandName(payload)
+		if err != nil {
+			t.Fatalf("decodeCommandName failed: %v", err)
+		}
+		t.Fatalf("CloseWindow should wait for ReplySaveChanges, got immediate write %q", command)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	transport.push(`["ReplySaveChanges",{"win":88}]`)
+
+	secondWrite := waitForWrite(t, transport.writeCh, 250*time.Millisecond)
+	secondCommand, err := decodeCommandName(secondWrite)
+	if err != nil {
+		t.Fatalf("failed decoding second write: %v", err)
+	}
+	if secondCommand != "CloseWindow" {
+		t.Fatalf("expected CloseWindow after ReplySaveChanges, got %q", secondCommand)
+	}
+
+	transport.close()
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("dispatcher did not stop")
+	}
+}
+
+func TestDispatcher_CloseWindowWithoutPendingSaveWritesImmediately(t *testing.T) {
+	transport := newMockTransport()
+	dispatcher := NewDispatcher(transport, protocol.NewCodec())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		dispatcher.Run(ctx)
+		close(done)
+	}()
+
+	transport.push(`["SetPromptType",{"type":0}]`)
+	waitForCondition(t, 250*time.Millisecond, func() bool {
+		promptType, known := dispatcher.PromptType()
+		return known && promptType == 0
+	})
+
+	if err := dispatcher.SendCommand("CloseWindow", protocol.WindowArgs{Win: 99}); err != nil {
+		t.Fatalf("SendCommand CloseWindow failed: %v", err)
+	}
+
+	write := waitForWrite(t, transport.writeCh, 250*time.Millisecond)
+	command, err := decodeCommandName(write)
+	if err != nil {
+		t.Fatalf("decodeCommandName failed: %v", err)
+	}
+	if command != "CloseWindow" {
+		t.Fatalf("expected immediate CloseWindow write, got %q", command)
+	}
+
+	transport.close()
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("dispatcher did not stop")
+	}
+}
+
+func TestDispatcher_SaveChangesWriteFailureDoesNotBlockCloseWindow(t *testing.T) {
+	transport := newMockTransport()
+	dispatcher := NewDispatcher(transport, protocol.NewCodec())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		dispatcher.Run(ctx)
+		close(done)
+	}()
+
+	transport.push(`["SetPromptType",{"type":0}]`)
+	waitForCondition(t, 250*time.Millisecond, func() bool {
+		promptType, known := dispatcher.PromptType()
+		return known && promptType == 0
+	})
+
+	transport.failNextWrite(errors.New("save write failed"))
+	err := dispatcher.SendCommand("SaveChanges", protocol.SaveChangesArgs{
+		Win:  55,
+		Text: []string{"x←1"},
+	})
+	if err == nil {
+		t.Fatal("expected SaveChanges write failure")
+	}
+
+	if err := dispatcher.SendCommand("CloseWindow", protocol.WindowArgs{Win: 55}); err != nil {
+		t.Fatalf("SendCommand CloseWindow failed: %v", err)
+	}
+	write := waitForWrite(t, transport.writeCh, 250*time.Millisecond)
+	command, err := decodeCommandName(write)
+	if err != nil {
+		t.Fatalf("decodeCommandName failed: %v", err)
+	}
+	if command != "CloseWindow" {
+		t.Fatalf("expected CloseWindow write after SaveChanges failure, got %q", command)
+	}
+
+	transport.close()
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("dispatcher did not stop")
+	}
+}
+
 func TestDispatcher_PublishDoesNotPanicWhenSubscriberChannelIsClosed(t *testing.T) {
 	dispatcher := NewDispatcher(newMockTransport(), protocol.NewCodec())
 	_, _ = dispatcher.Subscribe(1)

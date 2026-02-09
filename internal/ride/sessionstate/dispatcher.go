@@ -30,6 +30,8 @@ type Dispatcher struct {
 	promptType     int
 	promptTypeSeen bool
 	queue          []outboundCommand
+	pendingSaves   map[int]int
+	pendingCloses  map[int][]outboundCommand
 	subscribers    map[int]chan protocol.DecodedPayload
 	nextSubID      int
 	busyAllowList  map[string]struct{}
@@ -41,9 +43,11 @@ func NewDispatcher(transport Transport, codec *protocol.Codec) *Dispatcher {
 		codec = protocol.NewCodec()
 	}
 	return &Dispatcher{
-		transport:   transport,
-		codec:       codec,
-		subscribers: map[int]chan protocol.DecodedPayload{},
+		transport:     transport,
+		codec:         codec,
+		pendingSaves:  map[int]int{},
+		pendingCloses: map[int][]outboundCommand{},
+		subscribers:   map[int]chan protocol.DecodedPayload{},
 		busyAllowList: map[string]struct{}{
 			"WeakInterrupt":    {},
 			"StrongInterrupt":  {},
@@ -121,8 +125,20 @@ func (d *Dispatcher) SendCommand(command string, args any) error {
 	}
 
 	cmd := outboundCommand{name: command, args: args}
+	saveWin, tracksSave := saveWindowID(command, args)
 
 	d.mu.Lock()
+	if command == "CloseWindow" {
+		if closeWin, ok := windowIDFromArgs(args); ok && d.pendingSaves[closeWin] > 0 {
+			d.pendingCloses[closeWin] = append(d.pendingCloses[closeWin], cmd)
+			d.mu.Unlock()
+			return nil
+		}
+	}
+	if tracksSave {
+		d.pendingSaves[saveWin]++
+	}
+
 	busy := d.promptTypeSeen && d.promptType == 0
 	if busy && !d.isAllowedWhileBusy(command) {
 		d.queue = append(d.queue, cmd)
@@ -131,7 +147,13 @@ func (d *Dispatcher) SendCommand(command string, args any) error {
 	}
 	d.mu.Unlock()
 
-	return d.writeCommand(cmd)
+	if err := d.writeCommand(cmd); err != nil {
+		if tracksSave {
+			d.rollbackPendingSave(saveWin)
+		}
+		return err
+	}
+	return nil
 }
 
 func (d *Dispatcher) isAllowedWhileBusy(command string) bool {
@@ -147,6 +169,9 @@ func (d *Dispatcher) handleInbound(decoded protocol.DecodedPayload) {
 		if promptType, ok := extractPromptType(decoded.Args); ok {
 			d.handlePromptType(promptType)
 		}
+	}
+	if decoded.Kind == protocol.KindCommand && decoded.Command == "ReplySaveChanges" {
+		d.handleReplySaveChanges(decoded.Args)
 	}
 	d.publish(decoded)
 }
@@ -184,6 +209,62 @@ func (d *Dispatcher) writeCommand(cmd outboundCommand) error {
 		return err
 	}
 	return d.transport.WritePayload(payload)
+}
+
+func (d *Dispatcher) rollbackPendingSave(win int) {
+	if win <= 0 {
+		return
+	}
+
+	var deferred []outboundCommand
+	d.mu.Lock()
+	count := d.pendingSaves[win]
+	if count <= 1 {
+		delete(d.pendingSaves, win)
+		deferred = append([]outboundCommand{}, d.pendingCloses[win]...)
+		delete(d.pendingCloses, win)
+		d.mu.Unlock()
+		d.flushDeferredCloses(win, deferred)
+		return
+	}
+	d.pendingSaves[win] = count - 1
+	d.mu.Unlock()
+}
+
+func (d *Dispatcher) handleReplySaveChanges(args any) {
+	win, ok := windowIDFromArgs(args)
+	if !ok || win <= 0 {
+		return
+	}
+
+	var deferred []outboundCommand
+	d.mu.Lock()
+	count := d.pendingSaves[win]
+	if count <= 1 {
+		delete(d.pendingSaves, win)
+		deferred = append([]outboundCommand{}, d.pendingCloses[win]...)
+		delete(d.pendingCloses, win)
+	} else {
+		d.pendingSaves[win] = count - 1
+	}
+	if count > 1 {
+		d.mu.Unlock()
+		return
+	}
+	d.mu.Unlock()
+
+	d.flushDeferredCloses(win, deferred)
+}
+
+func (d *Dispatcher) flushDeferredCloses(win int, deferred []outboundCommand) {
+	for i, cmd := range deferred {
+		if err := d.writeCommand(cmd); err != nil {
+			d.mu.Lock()
+			d.pendingCloses[win] = append(deferred[i:], d.pendingCloses[win]...)
+			d.mu.Unlock()
+			return
+		}
+	}
 }
 
 func (d *Dispatcher) publish(decoded protocol.DecodedPayload) {
@@ -270,4 +351,40 @@ func toInt(v any) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func windowIDFromArgs(args any) (int, bool) {
+	switch v := args.(type) {
+	case protocol.WindowArgs:
+		if v.Win <= 0 {
+			return 0, false
+		}
+		return v.Win, true
+	case protocol.SaveChangesArgs:
+		if v.Win <= 0 {
+			return 0, false
+		}
+		return v.Win, true
+	case protocol.ReplySaveChangesArgs:
+		if v.Win <= 0 {
+			return 0, false
+		}
+		return v.Win, true
+	case map[string]any:
+		win, ok := toInt(v["win"])
+		if !ok || win <= 0 {
+			return 0, false
+		}
+		return win, true
+	default:
+		return 0, false
+	}
+}
+
+func saveWindowID(command string, args any) (int, bool) {
+	if command != "SaveChanges" {
+		return 0, false
+	}
+	win, ok := windowIDFromArgs(args)
+	return win, ok
 }
