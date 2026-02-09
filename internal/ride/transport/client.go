@@ -27,9 +27,10 @@ var (
 
 // Client manages low-level RIDE transport interactions.
 type Client struct {
-	mu   sync.Mutex
-	conn net.Conn
-	rd   *bufio.Reader
+	mu            sync.Mutex
+	conn          net.Conn
+	rd            *bufio.Reader
+	trafficLogger TrafficLogger
 }
 
 // NewClient creates a transport client.
@@ -43,6 +44,13 @@ func (c *Client) AttachConn(conn net.Conn) {
 	defer c.mu.Unlock()
 	c.conn = conn
 	c.rd = bufio.NewReader(conn)
+}
+
+// SetTrafficLogger enables structured inbound/outbound payload logging.
+func (c *Client) SetTrafficLogger(logger TrafficLogger) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.trafficLogger = logger
 }
 
 // WritePayload writes one framed RIDE payload.
@@ -63,6 +71,9 @@ func (c *Client) WritePayload(payload string) error {
 	}
 	if _, err := io.WriteString(c.conn, payload); err != nil {
 		return fmt.Errorf("write payload: %w", err)
+	}
+	if c.trafficLogger != nil {
+		c.trafficLogger.LogTraffic(DirectionOutbound, payload)
 	}
 	return nil
 }
@@ -91,7 +102,11 @@ func (c *Client) ReadPayload() (string, error) {
 	if string(body[:4]) != rideMagic {
 		return "", ErrInvalidMagic
 	}
-	return string(body[4:]), nil
+	payload := string(body[4:])
+	if c.trafficLogger != nil {
+		c.trafficLogger.LogTraffic(DirectionInbound, payload)
+	}
+	return payload, nil
 }
 
 // WriteCommand marshals and writes a command payload.
