@@ -209,6 +209,24 @@ func (s *Server) SetPauseFallback(fallback func() error) {
 	s.pauseFallback = fallback
 }
 
+// HandleRideReconnect resets transient runtime state and requests window layout rebuild.
+func (s *Server) HandleRideReconnect() []Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.state == stateCreated {
+		return nil
+	}
+
+	s.state = stateAttachedOrLaunched
+	s.resetRuntimeStateForReconnect()
+	s.requestWindowLayoutSync()
+
+	return []Event{
+		newOutputEvent("console", "RIDE reconnected; rebuilding window layout"),
+	}
+}
+
 // ResolveSourceReferenceForToken returns the DAP source reference bound to a RIDE token.
 func (s *Server) ResolveSourceReferenceForToken(token int) (int, bool) {
 	s.mu.Lock()
@@ -753,6 +771,18 @@ func (s *Server) terminateSessionFromRide() {
 	s.state = stateTerminated
 	s.activeTracerSet = false
 	s.activeThreadSet = false
+}
+
+func (s *Server) resetRuntimeStateForReconnect() {
+	s.activeTracerSet = false
+	s.activeThreadSet = false
+	s.tracerWindows = map[int]tracerWindowState{}
+	s.tracerOrder = nil
+	s.threadCache = map[int]Thread{}
+	s.threadOrder = nil
+	s.siDescriptions = map[int][]string{}
+	s.sourceByToken = map[int]sourceBinding{}
+	s.tokenBySourceRef = map[int]int{}
 }
 
 func newOutputEvent(category, output string) Event {

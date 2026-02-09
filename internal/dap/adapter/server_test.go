@@ -493,6 +493,116 @@ func TestHandleRidePayload_UnknownCommandEmitsOutputWithoutTermination(t *testin
 	}
 }
 
+func TestHandleRideReconnect_RequestsLayoutAndResetsActiveState(t *testing.T) {
+	ride := &mockRideController{}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+	server.SetActiveTracerWindow(77)
+
+	events := server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "Disconnect",
+		Args: protocol.DisconnectArgs{
+			Message: "network drop",
+		},
+	})
+	if len(events) == 0 || events[len(events)-1].Event != "terminated" {
+		t.Fatalf("expected disconnect to terminate, got %#v", events)
+	}
+
+	resp, _ := server.HandleRequest(Request{Seq: 46, Command: "configurationDone"})
+	if resp.Success {
+		t.Fatal("expected terminated session before reconnect")
+	}
+
+	reconnectEvents := server.HandleRideReconnect()
+	if len(reconnectEvents) != 1 || reconnectEvents[0].Event != "output" {
+		t.Fatalf("expected reconnect output event, got %#v", reconnectEvents)
+	}
+	if ride.lastCall().command != "GetWindowLayout" {
+		t.Fatalf("expected GetWindowLayout after reconnect, got %q", ride.lastCall().command)
+	}
+
+	resp, _ = server.HandleRequest(Request{Seq: 47, Command: "configurationDone"})
+	if !resp.Success {
+		t.Fatalf("expected session to recover after reconnect, got %s", resp.Message)
+	}
+
+	resp, _ = server.HandleRequest(Request{Seq: 48, Command: "continue"})
+	if resp.Success {
+		t.Fatal("expected active tracer window to be reset on reconnect")
+	}
+}
+
+func TestHandleRideReconnect_RebuildsSourceMappingFromLayoutEvents(t *testing.T) {
+	ride := &mockRideController{}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    701,
+			Filename: "/ws/src/reconnect.apl",
+		},
+	})
+	originalRef, ok := server.ResolveSourceReferenceForToken(701)
+	if !ok {
+		t.Fatal("expected sourceRef for initial window")
+	}
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "Disconnect",
+		Args: protocol.DisconnectArgs{
+			Message: "network drop",
+		},
+	})
+	_ = server.HandleRideReconnect()
+
+	if _, ok := server.ResolveSourceReferenceForToken(701); ok {
+		t.Fatal("expected old token mapping cleared on reconnect")
+	}
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    702,
+			Filename: "/ws/src/reconnect.apl",
+		},
+	})
+	rebuiltRef, ok := server.ResolveSourceReferenceForToken(702)
+	if !ok {
+		t.Fatal("expected rebuilt mapping after reconnect")
+	}
+	if rebuiltRef != originalRef {
+		t.Fatalf("expected stable sourceRef across reconnect, got %d (want %d)", rebuiltRef, originalRef)
+	}
+
+	resp, _ := server.HandleRequest(Request{
+		Seq:     49,
+		Command: "setBreakpoints",
+		Arguments: map[string]any{
+			"source": map[string]any{
+				"path": "/ws/src/reconnect.apl",
+			},
+			"breakpoints": []any{
+				map[string]any{"line": 6},
+			},
+		},
+	})
+	if !resp.Success {
+		t.Fatalf("expected setBreakpoints success after reconnect rebuild, got %s", resp.Message)
+	}
+	if ride.lastCall().command != "SetLineAttributes" || ride.lastCall().args["win"] != 702 {
+		t.Fatalf("expected SetLineAttributes to rebuilt token, got %#v", ride.lastCall())
+	}
+}
+
 func TestHandleRidePayload_OpenWindowNonDebuggerDoesNotEmitStopped(t *testing.T) {
 	server := NewServer()
 	enterRunningState(t, server)
