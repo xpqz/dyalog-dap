@@ -214,6 +214,7 @@ The repository includes a minimal VS Code extension at `vscode-extension/`:
 - adapter executable resolution (launch.json `adapterPath`, `DYALOG_DAP_ADAPTER_PATH`, workspace fallbacks)
 - guided commands for setup/validation (`Setup Launch Configuration`, `Validate Adapter Path`, `Validate RIDE Address`)
 - support command: `Generate Diagnostic Bundle` (writes redacted bundle JSON to `.dyalog-dap/support/`)
+- install command: `Install/Update Adapter` (downloads from GitHub Releases with checksum verification)
 - dedicated `Dyalog DAP` output channel with optional verbose diagnostics toggle
 
 Example debug configuration:

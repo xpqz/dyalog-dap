@@ -383,13 +383,13 @@ func TestScaffold_HasExtensionSetupAndDiagnosticsCommands(t *testing.T) {
 				Command string `json:"command"`
 				Title   string `json:"title"`
 			} `json:"commands"`
-			Configuration struct {
-				Properties map[string]struct {
-					Type        string `json:"type"`
-					Default     bool   `json:"default"`
-					Description string `json:"description"`
-				} `json:"properties"`
-			} `json:"configuration"`
+				Configuration struct {
+					Properties map[string]struct {
+						Type        string `json:"type"`
+						Default     any    `json:"default"`
+						Description string `json:"description"`
+					} `json:"properties"`
+				} `json:"configuration"`
 		} `json:"contributes"`
 	}
 	if err := json.Unmarshal(data, &pkg); err != nil {
@@ -746,6 +746,74 @@ func TestScaffold_HasExtensionHostTestHarnessForDiagnosticBundle(t *testing.T) {
 		"extension host",
 		"npm run test:exthost",
 		"ci",
+	}
+	for _, snippet := range requiredSnippets {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected vscode-extension/README.md to contain %q", snippet)
+		}
+	}
+}
+
+func TestScaffold_HasAdapterInstallCommandAndInstallerTests(t *testing.T) {
+	data, err := os.ReadFile("vscode-extension/package.json")
+	if err != nil {
+		t.Fatalf("missing vscode-extension/package.json: %v", err)
+	}
+	var pkg struct {
+		ActivationEvents []string `json:"activationEvents"`
+		Contributes      struct {
+			Commands []struct {
+				Command string `json:"command"`
+				Title   string `json:"title"`
+			} `json:"commands"`
+		} `json:"contributes"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		t.Fatalf("vscode-extension/package.json is not valid JSON: %v", err)
+	}
+
+	commandID := "dyalogDap.installAdapter"
+	hasCommand := false
+	for _, command := range pkg.Contributes.Commands {
+		if command.Command == commandID && strings.TrimSpace(command.Title) != "" {
+			hasCommand = true
+			break
+		}
+	}
+	if !hasCommand {
+		t.Fatalf("expected contributes.commands entry for %q", commandID)
+	}
+	activation := "onCommand:" + commandID
+	hasActivation := false
+	for _, event := range pkg.ActivationEvents {
+		if event == activation {
+			hasActivation = true
+			break
+		}
+	}
+	if !hasActivation {
+		t.Fatalf("expected activation event %q", activation)
+	}
+
+	requiredFiles := []string{
+		"vscode-extension/src/adapterInstaller.ts",
+		"vscode-extension/src/test/adapterInstaller.test.ts",
+	}
+	for _, file := range requiredFiles {
+		if _, err := os.Stat(file); err != nil {
+			t.Fatalf("missing %s: %v", file, err)
+		}
+	}
+
+	readme, err := os.ReadFile("vscode-extension/README.md")
+	if err != nil {
+		t.Fatalf("missing vscode-extension/README.md: %v", err)
+	}
+	text := strings.ToLower(string(readme))
+	requiredSnippets := []string{
+		"install/update adapter",
+		"checksum",
+		"github releases",
 	}
 	for _, snippet := range requiredSnippets {
 		if !strings.Contains(text, snippet) {

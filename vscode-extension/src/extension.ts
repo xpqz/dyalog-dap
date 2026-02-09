@@ -1,6 +1,7 @@
 import path from "path";
 import * as vscode from "vscode";
 import { expandWorkspace, resolveAdapterPath } from "./adapterPath";
+import { installAdapterFromLatestRelease } from "./adapterInstaller";
 import { buildAdapterLaunchContract, resolveDebugConfigurationContract } from "./contracts";
 import { buildDiagnosticBundle } from "./diagnosticsBundle";
 import {
@@ -56,6 +57,9 @@ export function activate(context: vscode.ExtensionContext): void {
       await runGenerateDiagnosticBundle(output, diagnostics, context.extension.packageJSON.version ?? "unknown");
     }
   );
+  const installAdapterCommand = vscode.commands.registerCommand("dyalogDap.installAdapter", async () => {
+    await runInstallAdapter(output, diagnostics, context);
+  });
 
   const configProvider = vscode.debug.registerDebugConfigurationProvider("dyalog-dap", {
     resolveDebugConfiguration(_folder, config: vscode.DebugConfiguration) {
@@ -66,8 +70,9 @@ export function activate(context: vscode.ExtensionContext): void {
   const descriptorFactory = vscode.debug.registerDebugAdapterDescriptorFactory("dyalog-dap", {
     createDebugAdapterDescriptor(session) {
       const config = (session.configuration ?? {}) as DebugConfig;
+      const normalizedConfig = applyInstalledAdapterFallback(config);
       const contract = buildAdapterLaunchContract(
-        config as Record<string, unknown>,
+        normalizedConfig as Record<string, unknown>,
         session.workspaceFolder?.uri?.fsPath ?? "",
         process.env
       );
@@ -120,6 +125,7 @@ export function activate(context: vscode.ExtensionContext): void {
     validateRideAddrCommand,
     toggleDiagnosticsVerboseCommand,
     generateDiagnosticBundleCommand,
+    installAdapterCommand,
     configProvider,
     descriptorFactory
   );
@@ -286,6 +292,38 @@ async function runGenerateDiagnosticBundle(
   void vscode.window.showInformationMessage(`Dyalog diagnostic bundle written to ${bundleFile.fsPath}`);
 }
 
+async function runInstallAdapter(
+  output: vscode.OutputChannel,
+  diagnostics: DiagnosticHistory,
+  context: vscode.ExtensionContext
+): Promise<void> {
+  try {
+    const installRoot = path.join(context.globalStorageUri.fsPath, "adapter");
+    const result = await installAdapterFromLatestRelease({
+      installRoot,
+      platform: process.platform,
+      arch: process.arch
+    });
+    await vscode.workspace
+      .getConfiguration("dyalogDap")
+      .update("adapter.installedPath", result.adapterPath, vscode.ConfigurationTarget.Global);
+    logDiagnostic(output, diagnostics, "info", "adapter.install.success", {
+      path: result.adapterPath,
+      release: result.versionTag,
+      asset: result.assetName
+    });
+    output.show(true);
+    void vscode.window.showInformationMessage(
+      `Installed adapter ${result.versionTag} (${result.assetName}) to ${result.adapterPath}.`
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logDiagnostic(output, diagnostics, "error", "adapter.install.failed", { error: message });
+    output.show(true);
+    void vscode.window.showErrorMessage(`Failed to install adapter: ${message}`);
+  }
+}
+
 function readLaunchConfigurations(workspaceFolder: vscode.WorkspaceFolder): Array<Record<string, unknown>> {
   const launchConfigs = vscode.workspace
     .getConfiguration("launch", workspaceFolder)
@@ -346,6 +384,23 @@ function filterEnvironmentForBundle(env: NodeJS.ProcessEnv): Record<string, stri
     }
   }
   return snapshot;
+}
+
+function applyInstalledAdapterFallback(config: DebugConfig): DebugConfig {
+  if (asNonEmptyString(config.adapterPath) !== "") {
+    return config;
+  }
+  const installed = vscode.workspace
+    .getConfiguration("dyalogDap")
+    .get<string>("adapter.installedPath", "")
+    .trim();
+  if (installed === "") {
+    return config;
+  }
+  return {
+    ...config,
+    adapterPath: installed
+  };
 }
 
 function logDiagnostic(
