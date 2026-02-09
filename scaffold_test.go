@@ -821,3 +821,54 @@ func TestScaffold_HasAdapterInstallCommandAndInstallerTests(t *testing.T) {
 		}
 	}
 }
+
+func TestScaffold_HasReleaseChecklistTemplateAndMetadataValidation(t *testing.T) {
+	releaseChecklist, err := os.ReadFile("docs/releases/release-checklist.md")
+	if err != nil {
+		t.Fatalf("missing docs/releases/release-checklist.md: %v", err)
+	}
+	checklistText := strings.ToLower(string(releaseChecklist))
+	checklistRequired := []string{
+		"adapter artifacts",
+		"extension artifacts",
+		"checksums",
+		"install",
+	}
+	for _, snippet := range checklistRequired {
+		if !strings.Contains(checklistText, snippet) {
+			t.Fatalf("expected release checklist to contain %q", snippet)
+		}
+	}
+
+	template, err := os.ReadFile("docs/releases/release-notes-template.md")
+	if err != nil {
+		t.Fatalf("missing docs/releases/release-notes-template.md: %v", err)
+	}
+	templateText := strings.ToLower(string(template))
+	templateRequired := []string{
+		"installation",
+		"checksums",
+		"support",
+	}
+	for _, snippet := range templateRequired {
+		if !strings.Contains(templateText, snippet) {
+			t.Fatalf("expected release-notes template to contain %q", snippet)
+		}
+	}
+
+	workflow, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatalf("missing .github/workflows/release.yml: %v", err)
+	}
+	workflowText := string(workflow)
+	requiredWorkflowSnippets := []string{
+		"Validate release artifact metadata",
+		"dist/checksums.txt",
+		"release-notes-template.md",
+	}
+	for _, snippet := range requiredWorkflowSnippets {
+		if !strings.Contains(workflowText, snippet) {
+			t.Fatalf("expected release workflow to contain %q", snippet)
+		}
+	}
+}

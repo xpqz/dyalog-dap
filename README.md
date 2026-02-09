@@ -81,6 +81,8 @@ Each release includes:
 Release page:
 
 - `https://github.com/xpqz/dyalog-dap/releases`
+- release checklist: `docs/releases/release-checklist.md`
+- release notes template: `docs/releases/release-notes-template.md`
 
 ### Local packaging command (maintainers)
 
