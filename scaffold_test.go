@@ -674,3 +674,38 @@ func TestScaffold_HasDiagnosticBundleIntegrationCommandTest(t *testing.T) {
 		}
 	}
 }
+
+func TestScaffold_HasBetaReadinessPolicyAndSupportMatrix(t *testing.T) {
+	data, err := os.ReadFile("docs/validations/beta-readiness.md")
+	if err != nil {
+		t.Fatalf("missing docs/validations/beta-readiness.md: %v", err)
+	}
+	text := strings.ToLower(string(data))
+	required := []string{
+		"beta readiness",
+		"release gate",
+		"support matrix",
+		"dyalog",
+		"vscode extension host",
+	}
+	for _, snippet := range required {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected beta-readiness doc to contain %q", snippet)
+		}
+	}
+
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatalf("missing README.md: %v", err)
+	}
+	readmeText := strings.ToLower(string(readme))
+	readmeRequired := []string{
+		"beta readiness",
+		"support matrix",
+	}
+	for _, snippet := range readmeRequired {
+		if !strings.Contains(readmeText, snippet) {
+			t.Fatalf("expected README to contain %q", snippet)
+		}
+	}
+}

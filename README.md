@@ -132,6 +132,27 @@ DYALOG_RIDE_ADDR=127.0.0.1:4502 go run ./cmd/dap-adapter
 
 Current limitation: VSIX packaging is automated, but Marketplace publication still requires manual publisher credentials/approval.
 
+## Beta Readiness and Support Matrix
+
+Beta readiness policy and release gate detail:
+
+- `/Users/stefan/work/lsp-dap/docs/validations/beta-readiness.md`
+
+Current support matrix target:
+
+- Dyalog: 19.0 baseline
+- macOS: arm64, amd64
+- Linux: amd64, arm64
+- Windows: amd64, arm64
+- VS Code: current stable major supported by extension manifest
+
+Beta release gate summary:
+
+- Core tests/lint/build clean
+- Recent live Dyalog matrix signal
+- Diagnostic bundle + triage workflow validated
+- Release artifacts include checksums and install guidance
+
 ### Evaluate Context Matrix
 
 - `watch`: strict ValueTip evaluate, requires paused/ready prompt and frame context.
