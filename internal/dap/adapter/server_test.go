@@ -2195,6 +2195,9 @@ func TestHandleRequest_SetBreakpointsTranslatesLinesAndSendsSetLineAttributes(t 
 	if !body.Breakpoints[0].Verified || body.Breakpoints[0].Line != 2 {
 		t.Fatalf("unexpected first breakpoint response: %#v", body.Breakpoints[0])
 	}
+	if !strings.Contains(strings.ToLower(body.Breakpoints[0].Message), "active") {
+		t.Fatalf("expected active breakpoint message, got %#v", body.Breakpoints[0])
+	}
 }
 
 func TestHandleRequest_SetBreakpointsSupportsSourceReferenceLookup(t *testing.T) {
@@ -2272,6 +2275,39 @@ func TestHandleRequest_SetBreakpointsUnverifiedWhenSourceNotMapped(t *testing.T)
 	if body.Breakpoints[0].Verified {
 		t.Fatal("expected unverified breakpoint for unmapped source")
 	}
+	if !strings.Contains(strings.ToLower(body.Breakpoints[0].Message), "pending") {
+		t.Fatalf("expected pending breakpoint message, got %#v", body.Breakpoints[0])
+	}
+}
+
+func TestHandleRequest_SetBreakpointsPendingEmitsDiagnosticOutputEvent(t *testing.T) {
+	ride := &mockRideController{}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+
+	resp, events := server.HandleRequest(Request{
+		Seq:     72,
+		Command: "setBreakpoints",
+		Arguments: map[string]any{
+			"source": map[string]any{
+				"path": "/ws/src/pending.apl",
+			},
+			"breakpoints": []any{
+				map[string]any{"line": 3},
+			},
+		},
+	})
+	if !resp.Success {
+		t.Fatalf("expected pending setBreakpoints success, got %s", resp.Message)
+	}
+	if len(events) != 1 || events[0].Event != "output" {
+		t.Fatalf("expected one output diagnostic event, got %#v", events)
+	}
+	output := events[0].Body.(OutputEventBody).Output
+	if !strings.Contains(strings.ToLower(output), "breakpoints pending") {
+		t.Fatalf("expected pending diagnostic output, got %q", output)
+	}
 }
 
 func TestHandleRidePayload_OpenWindowAppliesDeferredBreakpoints(t *testing.T) {
@@ -2297,7 +2333,7 @@ func TestHandleRidePayload_OpenWindowAppliesDeferredBreakpoints(t *testing.T) {
 		t.Fatalf("expected setBreakpoints success, got %s", resp.Message)
 	}
 
-	server.HandleRidePayload(protocol.DecodedPayload{
+	events := server.HandleRidePayload(protocol.DecodedPayload{
 		Kind:    protocol.KindCommand,
 		Command: "OpenWindow",
 		Args: protocol.WindowContentArgs{
@@ -2319,6 +2355,12 @@ func TestHandleRidePayload_OpenWindowAppliesDeferredBreakpoints(t *testing.T) {
 	stop := last.args["stop"].([]int)
 	if len(stop) != 2 || stop[0] != 3 || stop[1] != 8 {
 		t.Fatalf("expected stop=[3 8], got %#v", stop)
+	}
+	if len(events) == 0 || events[0].Event != "output" {
+		t.Fatalf("expected output diagnostic event from deferred apply, got %#v", events)
+	}
+	if !strings.Contains(strings.ToLower(events[0].Body.(OutputEventBody).Output), "deferred apply succeeded") {
+		t.Fatalf("expected deferred apply success diagnostic, got %#v", events[0])
 	}
 }
 
@@ -2369,6 +2411,54 @@ func TestHandleRequest_SetBreakpointsUnmappedReplacesDeferredLines(t *testing.T)
 	stop := last.args["stop"].([]int)
 	if len(stop) != 1 || stop[0] != 6 {
 		t.Fatalf("expected latest deferred stop=[6], got %#v", stop)
+	}
+}
+
+func TestHandleRidePayload_UpdateWindowAppliesDeferredBreakpointsWithConsistentLineTranslation(t *testing.T) {
+	ride := &mockRideController{}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+
+	_, _ = server.HandleRequest(Request{
+		Seq:     77,
+		Command: "setBreakpoints",
+		Arguments: map[string]any{
+			"source": map[string]any{
+				"path": "/ws/src/update-deferred.apl",
+			},
+			"breakpoints": []any{
+				map[string]any{"line": 1},
+				map[string]any{"line": 10},
+			},
+		},
+	})
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    511,
+			Filename: "/ws/src/other.apl",
+		},
+	})
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "UpdateWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    511,
+			Filename: "/ws/src/update-deferred.apl",
+		},
+	})
+
+	last := ride.lastCall()
+	if last.command != "SetLineAttributes" {
+		t.Fatalf("expected SetLineAttributes, got %q", last.command)
+	}
+	stop := last.args["stop"].([]int)
+	if len(stop) != 2 || stop[0] != 0 || stop[1] != 9 {
+		t.Fatalf("expected consistent zero-based stops [0 9], got %#v", stop)
 	}
 }
 

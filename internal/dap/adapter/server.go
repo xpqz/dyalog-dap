@@ -102,6 +102,7 @@ type SourceResponseBody struct {
 type Breakpoint struct {
 	Verified bool `json:"verified"`
 	Line     int  `json:"line,omitempty"`
+	Message  string `json:"message,omitempty"`
 }
 
 // SetBreakpointsResponseBody is returned by DAP setBreakpoints requests.
@@ -388,6 +389,8 @@ func (s *Server) HandleRequest(req Request) (Response, []Event) {
 		return s.handleSourceRequest(req), nil
 	case "scopes":
 		return s.handleScopesRequest(req), nil
+	case "setBreakpoints":
+		return s.handleSetBreakpointsRequest(req)
 	}
 
 	s.mu.Lock()
@@ -437,8 +440,6 @@ func (s *Server) HandleRequest(req Request) (Response, []Event) {
 		return s.handleStackTraceRequest(req), nil
 	case "variables":
 		return s.handleVariablesRequest(req), nil
-	case "setBreakpoints":
-		return s.handleSetBreakpointsRequest(req), nil
 
 	default:
 		return s.failure(req, "unsupported command"), nil
@@ -534,51 +535,70 @@ func (s *Server) handleStackTraceRequest(req Request) Response {
 	}
 }
 
-func (s *Server) handleSetBreakpointsRequest(req Request) Response {
+func (s *Server) handleSetBreakpointsRequest(req Request) (Response, []Event) {
+	s.mu.Lock()
 	if s.state != stateAttachedOrLaunched {
-		return s.failure(req, "setBreakpoints requires launch or attach")
+		s.mu.Unlock()
+		return s.failure(req, "setBreakpoints requires launch or attach"), nil
 	}
 	if s.rideController == nil {
-		return s.failure(req, "no RIDE controller configured")
+		s.mu.Unlock()
+		return s.failure(req, "no RIDE controller configured"), nil
 	}
 
 	args, ok := extractSetBreakpointsArguments(req.Arguments)
 	if !ok {
-		return s.failure(req, "setBreakpoints requires source and breakpoints")
+		s.mu.Unlock()
+		return s.failure(req, "setBreakpoints requires source and breakpoints"), nil
 	}
 
 	token, mapped := s.resolveTokenForSetBreakpoints(args)
+	controller := s.rideController
 	if !mapped {
 		s.deferBreakpoints(args)
+		s.mu.Unlock()
 		s.requestWindowLayoutSync()
 		return Response{
 			RequestSeq: req.Seq,
 			Command:    req.Command,
 			Success:    true,
 			Body: SetBreakpointsResponseBody{
-				Breakpoints: buildBreakpointResponses(args.lines, false),
+				Breakpoints: buildBreakpointResponses(
+					args.lines,
+					false,
+					"Pending: source not currently mapped; will apply after window/layout update.",
+				),
 			},
+		}, []Event{
+			newOutputEvent("console", fmt.Sprintf("breakpoints pending (%s): %v", breakpointSourceLabel(args), args.lines)),
 		}
 	}
+	s.mu.Unlock()
 
 	stop := zeroBasedLines(args.lines)
-	if err := s.rideController.SendCommand("SetLineAttributes", map[string]any{
+	if err := controller.SendCommand("SetLineAttributes", map[string]any{
 		"win":     token,
 		"stop":    stop,
 		"monitor": []int{},
 		"trace":   []int{},
 	}); err != nil {
-		return s.failure(req, "failed to send SetLineAttributes")
+		return s.failure(req, "failed to send SetLineAttributes"), []Event{
+			newOutputEvent("stderr", fmt.Sprintf("breakpoints apply failed (%s): %v", breakpointSourceLabel(args), err)),
+		}
 	}
+	s.mu.Lock()
 	s.clearDeferredBreakpoints(args)
+	s.mu.Unlock()
 
 	return Response{
 		RequestSeq: req.Seq,
 		Command:    req.Command,
 		Success:    true,
 		Body: SetBreakpointsResponseBody{
-			Breakpoints: buildBreakpointResponses(args.lines, true),
+			Breakpoints: buildBreakpointResponses(args.lines, true, "Active: mapped to current source window."),
 		},
+	}, []Event{
+		newOutputEvent("console", fmt.Sprintf("breakpoints active (token=%d): %v", token, args.lines)),
 	}
 }
 
@@ -877,11 +897,11 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 		}
 		s.bindTokenToSource(window.Token, window.Filename, window.Name)
 		s.storeSourceText(window.Filename, window.Text)
-		s.applyDeferredBreakpoints(window.Token)
+		events := s.applyDeferredBreakpoints(window.Token)
 		if window.Debugger {
 			s.updateTracerWindow(window)
 		}
-		return nil
+		return events
 
 	case "CloseWindow":
 		windowArgs, ok := extractWindowArgs(decoded.Args)
@@ -909,9 +929,9 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 		}
 		s.bindTokenToSource(window.Token, window.Filename, window.Name)
 		s.storeSourceText(window.Filename, window.Text)
-		s.applyDeferredBreakpoints(window.Token)
+		events := s.applyDeferredBreakpoints(window.Token)
 		if !window.Debugger {
-			return nil
+			return events
 		}
 
 		s.updateTracerWindow(window)
@@ -923,10 +943,10 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 			s.activeThreadSet = true
 		}
 
-		return []Event{{
+		return append(events, Event{
 			Event: "stopped",
 			Body:  s.newStoppedEventBody("entry", ""),
-		}}
+		})
 
 	case "SetHighlightLine":
 		highlight, ok := extractSetHighlightLine(decoded.Args)
@@ -1718,21 +1738,21 @@ func (s *Server) requestWindowLayoutSync() {
 	_ = s.rideController.SendCommand("GetWindowLayout", map[string]any{})
 }
 
-func (s *Server) applyDeferredBreakpoints(token int) {
+func (s *Server) applyDeferredBreakpoints(token int) []Event {
 	if s.rideController == nil || token <= 0 {
-		return
+		return nil
 	}
 
 	binding, ok := s.sourceByToken[token]
 	if !ok {
-		return
+		return nil
 	}
 
 	lines, ok := s.pendingBySourceRef[binding.sourceRef]
 	if !ok {
 		lines, ok = s.pendingByPath[binding.path]
 		if !ok {
-			return
+			return nil
 		}
 	}
 
@@ -1742,22 +1762,38 @@ func (s *Server) applyDeferredBreakpoints(token int) {
 		"monitor": []int{},
 		"trace":   []int{},
 	}); err != nil {
-		return
+		return []Event{
+			newOutputEvent("stderr", fmt.Sprintf("breakpoints deferred apply failed (token=%d path=%s): %v", token, binding.path, err)),
+		}
 	}
 
 	delete(s.pendingBySourceRef, binding.sourceRef)
 	delete(s.pendingByPath, binding.path)
+	return []Event{
+		newOutputEvent("console", fmt.Sprintf("breakpoints deferred apply succeeded (token=%d path=%s): %v", token, binding.path, lines)),
+	}
 }
 
-func buildBreakpointResponses(lines []int, verified bool) []Breakpoint {
+func buildBreakpointResponses(lines []int, verified bool, message string) []Breakpoint {
 	breakpoints := make([]Breakpoint, 0, len(lines))
 	for _, line := range lines {
 		breakpoints = append(breakpoints, Breakpoint{
 			Verified: verified,
 			Line:     line,
+			Message:  message,
 		})
 	}
 	return breakpoints
+}
+
+func breakpointSourceLabel(args setBreakpointsArguments) string {
+	if args.path != "" {
+		return args.path
+	}
+	if args.sourceReference > 0 {
+		return fmt.Sprintf("sourceReference=%d", args.sourceReference)
+	}
+	return "<unknown-source>"
 }
 
 func zeroBasedLines(lines []int) []int {

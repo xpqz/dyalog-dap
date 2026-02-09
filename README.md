@@ -125,6 +125,7 @@ DYALOG_RIDE_ADDR=127.0.0.1:4502 go run ./cmd/dap-adapter
 - DAP source retrieval and evaluate (watch/repl via ValueTip path)
 - Source lifecycle precedence: active window text is authoritative; closed/unmapped sources fall back to disk with diagnostic failures
 - Practical locals/globals inspection model with value-tip-backed symbol values and expandable/truncated large values
+- Breakpoint lifecycle feedback with pending/active messages and deferred-apply diagnostics emitted to DAP output
 - Long-running stdio DAP server entrypoint (`cmd/dap-adapter`)
 - Integration harness with protocol transcript artifacts
 - CI gating + VS Code smoke workflow scaffolding
