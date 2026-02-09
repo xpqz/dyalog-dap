@@ -9,7 +9,7 @@ If you are an APL user and just want debugging to work in VS Code, start here.
 Current status (as of February 9, 2026):
 
 - The `dap-adapter` binary is now a long-running stdio DAP server.
-- Core phase-1 debug commands are wired: initialize, launch/attach, threads, stackTrace, continue/step/pause, setBreakpoints.
+- Core phase-1 debug commands are wired: initialize, launch/attach, threads, stackTrace, scopes, variables, source, evaluate, continue/step/pause, setBreakpoints.
 - Live Dyalog smoke coverage is in CI and local tests.
 - A minimal VS Code debugger extension is included under `vscode-extension/` (debug type: `dyalog-dap`).
 - A published VSIX/Marketplace release is not yet shipped from this repository.
@@ -122,6 +122,7 @@ DYALOG_RIDE_ADDR=127.0.0.1:4502 go run ./cmd/dap-adapter
 - Typed RIDE protocol codec for phase-1 command surface
 - Prompt-aware session dispatcher with queue/allow-list semantics
 - DAP adapter core lifecycle, run control, thread/stack, breakpoint mapping
+- DAP source retrieval and evaluate (watch/repl via ValueTip path)
 - Long-running stdio DAP server entrypoint (`cmd/dap-adapter`)
 - Integration harness with protocol transcript artifacts
 - CI gating + VS Code smoke workflow scaffolding

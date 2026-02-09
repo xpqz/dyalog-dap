@@ -258,6 +258,7 @@ type mockRideController struct {
 	calls            []rideCall
 	sendErr          error
 	sendErrByCommand map[string]error
+	onSend           func(command string, args map[string]any)
 }
 
 func (m *mockRideController) SendCommand(command string, args any) error {
@@ -269,6 +270,9 @@ func (m *mockRideController) SendCommand(command string, args any) error {
 		command: command,
 		args:    typedArgs,
 	})
+	if m.onSend != nil {
+		m.onSend(command, typedArgs)
+	}
 
 	if m.sendErrByCommand != nil {
 		if err, ok := m.sendErrByCommand[command]; ok {
@@ -1176,6 +1180,167 @@ func TestHandleRequest_VariablesEmptyArrayReturnsEmptySlice(t *testing.T) {
 	}
 	if len(siBody.Variables) != 0 {
 		t.Fatalf("expected zero siStack children, got %#v", siBody.Variables)
+	}
+}
+
+func TestHandleRequest_EvaluateWatchUsesValueTipAndReturnsDecodedResult(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	ride := &mockRideController{}
+	ride.onSend = func(command string, args map[string]any) {
+		if command != "GetValueTip" {
+			return
+		}
+		server.HandleRidePayload(protocol.DecodedPayload{
+			Kind:    protocol.KindCommand,
+			Command: "ValueTip",
+			Args: map[string]any{
+				"tip":   []any{"0 1 2", "3 4 5"},
+				"class": 2,
+				"token": args["token"],
+			},
+		})
+	}
+	server.SetRideController(ride)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    801,
+			Debugger: true,
+			Tid:      5,
+		},
+	})
+
+	resp, _ := server.HandleRequest(Request{
+		Seq:     80,
+		Command: "evaluate",
+		Arguments: map[string]any{
+			"expression": "foo",
+			"context":    "watch",
+			"frameId":    801,
+		},
+	})
+	if !resp.Success {
+		t.Fatalf("expected evaluate success, got %s", resp.Message)
+	}
+	if len(ride.calls) != 1 || ride.calls[0].command != "GetValueTip" {
+		t.Fatalf("expected one GetValueTip command, got %#v", ride.calls)
+	}
+	if got := ride.calls[0].args["win"]; got != 801 {
+		t.Fatalf("expected GetValueTip win=801, got %#v", got)
+	}
+	if got := ride.calls[0].args["line"]; got != "foo" {
+		t.Fatalf("expected GetValueTip line=foo, got %#v", got)
+	}
+
+	body, ok := resp.Body.(EvaluateResponseBody)
+	if !ok {
+		t.Fatalf("expected EvaluateResponseBody, got %T", resp.Body)
+	}
+	if body.Result != "0 1 2\n3 4 5" {
+		t.Fatalf("unexpected evaluate result: %#v", body)
+	}
+	if body.Type != "nameclass(2)" {
+		t.Fatalf("unexpected evaluate type: %#v", body)
+	}
+	if body.VariablesReference != 0 {
+		t.Fatalf("expected scalar evaluate result, got %#v", body)
+	}
+}
+
+func TestHandleRequest_EvaluateFailsWhenPromptBusy(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+	ride := &mockRideController{}
+	server.SetRideController(ride)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    802,
+			Debugger: true,
+			Tid:      6,
+		},
+	})
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "SetPromptType",
+		Args: map[string]any{
+			"type": 0,
+		},
+	})
+
+	resp, _ := server.HandleRequest(Request{
+		Seq:     81,
+		Command: "evaluate",
+		Arguments: map[string]any{
+			"expression": "foo",
+			"context":    "watch",
+			"frameId":    802,
+		},
+	})
+	if resp.Success {
+		t.Fatal("expected evaluate to fail while promptType=0")
+	}
+	if len(ride.calls) != 0 {
+		t.Fatalf("expected busy evaluate to avoid RIDE send, got %#v", ride.calls)
+	}
+}
+
+func TestHandleRequest_SourceReturnsMappedWindowText(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    901,
+			Filename: "/ws/src/source.apl",
+			Text:     []string{"[fn-header]", "r<-x+1", "[fn-end]"},
+		},
+	})
+	sourceRef, ok := server.ResolveSourceReferenceForToken(901)
+	if !ok {
+		t.Fatal("expected source reference mapping for token")
+	}
+
+	resp, _ := server.HandleRequest(Request{
+		Seq:     82,
+		Command: "source",
+		Arguments: map[string]any{
+			"sourceReference": sourceRef,
+		},
+	})
+	if !resp.Success {
+		t.Fatalf("expected source success, got %s", resp.Message)
+	}
+	body, ok := resp.Body.(SourceResponseBody)
+	if !ok {
+		t.Fatalf("expected SourceResponseBody, got %T", resp.Body)
+	}
+	if body.Content != "[fn-header]\nr<-x+1\n[fn-end]" {
+		t.Fatalf("unexpected source content: %#v", body)
+	}
+}
+
+func TestHandleRequest_SourceWithoutMappingFails(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	resp, _ := server.HandleRequest(Request{
+		Seq:     83,
+		Command: "source",
+		Arguments: map[string]any{
+			"sourceReference": 9999,
+		},
+	})
+	if resp.Success {
+		t.Fatal("expected missing source mapping to fail")
 	}
 }
 

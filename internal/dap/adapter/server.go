@@ -2,8 +2,10 @@ package adapter
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/stefan/lsp-dap/internal/ride/protocol"
 )
@@ -80,6 +82,19 @@ type VariablesResponseBody struct {
 	Variables []Variable `json:"variables"`
 }
 
+// EvaluateResponseBody is returned by DAP evaluate requests.
+type EvaluateResponseBody struct {
+	Result             string `json:"result"`
+	Type               string `json:"type,omitempty"`
+	VariablesReference int    `json:"variablesReference"`
+}
+
+// SourceResponseBody is returned by DAP source requests.
+type SourceResponseBody struct {
+	Content  string `json:"content"`
+	MimeType string `json:"mimeType,omitempty"`
+}
+
 // Breakpoint describes one DAP breakpoint result.
 type Breakpoint struct {
 	Verified bool `json:"verified"`
@@ -119,6 +134,8 @@ const (
 	stateTerminated
 )
 
+const evaluateTimeout = 2 * time.Second
+
 // Server is the DAP adapter entry point.
 type Server struct {
 	mu                 sync.Mutex
@@ -138,12 +155,17 @@ type Server struct {
 	tokenBySourceRef   map[int]int
 	sourceRefByPath    map[string]int
 	pathBySourceRef    map[int]string
+	sourceTextByPath   map[string][]string
 	pendingByPath      map[string][]int
 	pendingBySourceRef map[int][]int
 	nextSourceRef      int
 	frameScopeRef      map[int]int
 	variablesByRef     map[int][]Variable
 	nextVariablesRef   int
+	evaluateWaiters    map[int]chan evaluateResult
+	nextEvaluateToken  int
+	promptType         int
+	promptTypeSeen     bool
 	syntheticThreadIDs map[string]int
 	nextSyntheticID    int
 	pauseFallback      func() error
@@ -171,6 +193,28 @@ type setBreakpointsArguments struct {
 	path            string
 	sourceReference int
 	lines           []int
+}
+
+type evaluateArguments struct {
+	expression string
+	frameID    int
+	context    string
+}
+
+type sourceArguments struct {
+	path            string
+	sourceReference int
+}
+
+type valueTipArgs struct {
+	tip   []string
+	class int
+	token int
+}
+
+type evaluateResult struct {
+	text  string
+	class int
 }
 
 // StoppedEventBody is emitted for DAP stopped events synthesized from RIDE lifecycle signals.
@@ -201,7 +245,7 @@ func NewServer() *Server {
 			SupportsHitConditionalBreakpoints: false,
 			SupportsSetVariable:               false,
 			SupportsExceptionInfoRequest:      false,
-			SupportsEvaluateForHovers:         false,
+			SupportsEvaluateForHovers:         true,
 		},
 		tracerWindows:      map[int]tracerWindowState{},
 		threadCache:        map[int]Thread{},
@@ -212,12 +256,15 @@ func NewServer() *Server {
 		tokenBySourceRef:   map[int]int{},
 		sourceRefByPath:    map[string]int{},
 		pathBySourceRef:    map[int]string{},
+		sourceTextByPath:   map[string][]string{},
 		pendingByPath:      map[string][]int{},
 		pendingBySourceRef: map[int][]int{},
 		nextSourceRef:      1,
 		frameScopeRef:      map[int]int{},
 		variablesByRef:     map[int][]Variable{},
 		nextVariablesRef:   1,
+		evaluateWaiters:    map[int]chan evaluateResult{},
+		nextEvaluateToken:  1,
 		syntheticThreadIDs: map[string]int{},
 		nextSyntheticID:    1000000,
 	}
@@ -228,6 +275,9 @@ func (s *Server) SetRideController(controller RideCommandSender) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rideController = controller
+	if controller == nil {
+		s.evaluateWaiters = map[int]chan evaluateResult{}
+	}
 }
 
 // SetActiveTracerWindow sets the current tracer window id used for step/continue commands.
@@ -291,6 +341,13 @@ func (s *Server) ResolveTokenForSourceReference(sourceRef int) (int, bool) {
 
 // HandleRequest processes initialize/launch/attach/lifecycle skeleton requests.
 func (s *Server) HandleRequest(req Request) (Response, []Event) {
+	switch req.Command {
+	case "evaluate":
+		return s.handleEvaluateRequest(req), nil
+	case "source":
+		return s.handleSourceRequest(req), nil
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -529,6 +586,126 @@ func (s *Server) handleVariablesRequest(req Request) Response {
 	})
 }
 
+func (s *Server) handleEvaluateRequest(req Request) Response {
+	args, ok := extractEvaluateArguments(req.Arguments)
+	if !ok {
+		return s.failure(req, "evaluate requires expression")
+	}
+
+	s.mu.Lock()
+	if s.state == stateTerminated {
+		s.mu.Unlock()
+		return s.failure(req, "session already terminated")
+	}
+	if s.state != stateAttachedOrLaunched {
+		s.mu.Unlock()
+		return s.failure(req, "evaluate requires launch or attach")
+	}
+	if s.rideController == nil {
+		s.mu.Unlock()
+		return s.failure(req, "no RIDE controller configured")
+	}
+	if args.context != "watch" && args.context != "repl" && args.context != "hover" {
+		s.mu.Unlock()
+		return s.failure(req, "evaluate supports repl/watch contexts only")
+	}
+	if s.promptTypeSeen && s.promptType == 0 {
+		s.mu.Unlock()
+		return s.failure(req, "interpreter is busy; evaluate requires ready prompt")
+	}
+
+	win := args.frameID
+	if win <= 0 && s.activeTracerSet {
+		win = s.activeTracerWindow
+	}
+	if win <= 0 {
+		s.mu.Unlock()
+		return s.failure(req, "evaluate requires frameId or active tracer window")
+	}
+
+	token := s.nextEvaluateToken
+	s.nextEvaluateToken++
+	waiter := make(chan evaluateResult, 1)
+	s.evaluateWaiters[token] = waiter
+	controller := s.rideController
+	s.mu.Unlock()
+
+	if err := controller.SendCommand("GetValueTip", map[string]any{
+		"win":       win,
+		"line":      args.expression,
+		"pos":       len([]rune(args.expression)),
+		"maxWidth":  200,
+		"maxHeight": 200,
+		"token":     token,
+	}); err != nil {
+		s.mu.Lock()
+		delete(s.evaluateWaiters, token)
+		s.mu.Unlock()
+		return s.failure(req, "failed to send GetValueTip")
+	}
+
+	select {
+	case result := <-waiter:
+		typeName := "string"
+		if result.class != 0 {
+			typeName = fmt.Sprintf("nameclass(%d)", result.class)
+		}
+		return s.successWithBody(req, EvaluateResponseBody{
+			Result:             result.text,
+			Type:               typeName,
+			VariablesReference: 0,
+		})
+	case <-time.After(evaluateTimeout):
+		s.mu.Lock()
+		delete(s.evaluateWaiters, token)
+		s.mu.Unlock()
+		return s.failure(req, "timed out waiting for ValueTip")
+	}
+}
+
+func (s *Server) handleSourceRequest(req Request) Response {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.state == stateTerminated {
+		return s.failure(req, "session already terminated")
+	}
+	if s.state != stateAttachedOrLaunched {
+		return s.failure(req, "source requires launch or attach")
+	}
+
+	args, ok := extractSourceArguments(req.Arguments)
+	if !ok {
+		return s.failure(req, "source requires source.path or sourceReference")
+	}
+
+	path := args.path
+	if args.sourceReference > 0 {
+		if mapped, exists := s.pathBySourceRef[args.sourceReference]; exists {
+			path = mapped
+		}
+	}
+	if path == "" {
+		return s.failure(req, "source requires a mapped sourceReference or path")
+	}
+
+	if lines, ok := s.sourceTextByPath[path]; ok {
+		return s.successWithBody(req, SourceResponseBody{
+			Content:  strings.Join(lines, "\n"),
+			MimeType: "text/plain",
+		})
+	}
+
+	bytes, err := os.ReadFile(path)
+	if err != nil {
+		return s.failure(req, "source content is unavailable")
+	}
+	return s.successWithBody(req, SourceResponseBody{
+		Content:  string(bytes),
+		MimeType: "text/plain",
+	})
+}
+
 // HandleRidePayload updates adapter runtime stop state from inbound RIDE events.
 func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 	s.mu.Lock()
@@ -553,6 +730,7 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 			return nil
 		}
 		s.bindTokenToSource(window.Token, window.Filename, window.Name)
+		s.storeSourceText(window.Filename, window.Text)
 		s.applyDeferredBreakpoints(window.Token)
 		if window.Debugger {
 			s.updateTracerWindow(window)
@@ -584,6 +762,7 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 			return nil
 		}
 		s.bindTokenToSource(window.Token, window.Filename, window.Name)
+		s.storeSourceText(window.Filename, window.Text)
 		s.applyDeferredBreakpoints(window.Token)
 		if !window.Debugger {
 			return nil
@@ -634,6 +813,23 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 		}
 		s.activeThreadID = setThread.Tid
 		s.activeThreadSet = true
+		return nil
+
+	case "SetPromptType":
+		promptType, ok := extractSetPromptType(decoded.Args)
+		if !ok {
+			return nil
+		}
+		s.promptType = promptType
+		s.promptTypeSeen = true
+		return nil
+
+	case "ValueTip":
+		valueTip, ok := extractValueTip(decoded.Args)
+		if !ok {
+			return nil
+		}
+		s.dispatchValueTip(valueTip)
 		return nil
 
 	case "HadError":
@@ -869,6 +1065,8 @@ func (s *Server) terminateSessionFromRide() {
 	s.state = stateTerminated
 	s.activeTracerSet = false
 	s.activeThreadSet = false
+	s.promptTypeSeen = false
+	s.evaluateWaiters = map[int]chan evaluateResult{}
 }
 
 func (s *Server) resetRuntimeStateForReconnect() {
@@ -881,9 +1079,12 @@ func (s *Server) resetRuntimeStateForReconnect() {
 	s.siDescriptions = map[int][]string{}
 	s.sourceByToken = map[int]sourceBinding{}
 	s.tokenBySourceRef = map[int]int{}
+	s.sourceTextByPath = map[string][]string{}
 	s.frameScopeRef = map[int]int{}
 	s.variablesByRef = map[int][]Variable{}
 	s.nextVariablesRef = 1
+	s.evaluateWaiters = map[int]chan evaluateResult{}
+	s.promptTypeSeen = false
 }
 
 func newOutputEvent(category, output string) Event {
@@ -977,6 +1178,7 @@ func extractWindowContent(args any) (protocol.WindowContentArgs, bool) {
 			Token:         intFromAny(v["token"]),
 			Filename:      stringFromAny(v["filename"]),
 			Name:          stringFromAny(v["name"]),
+			Text:          stringSliceFromAny(v["text"]),
 			Debugger:      boolFromAny(v["debugger"]),
 			Tid:           intFromAny(v["tid"]),
 			CurrentRow:    intFromAny(v["currentRow"]),
@@ -1191,6 +1393,46 @@ func extractVariablesReferenceArgument(args any) int {
 	return intFromAny(m["variablesReference"])
 }
 
+func extractEvaluateArguments(args any) (evaluateArguments, bool) {
+	typedArgs, ok := args.(map[string]any)
+	if !ok {
+		return evaluateArguments{}, false
+	}
+	expression := stringFromAny(typedArgs["expression"])
+	if expression == "" {
+		return evaluateArguments{}, false
+	}
+	context := stringFromAny(typedArgs["context"])
+	if context == "" {
+		context = "repl"
+	}
+	return evaluateArguments{
+		expression: expression,
+		frameID:    intFromAny(typedArgs["frameId"]),
+		context:    context,
+	}, true
+}
+
+func extractSourceArguments(args any) (sourceArguments, bool) {
+	typedArgs, ok := args.(map[string]any)
+	if !ok {
+		return sourceArguments{}, false
+	}
+	parsed := sourceArguments{
+		sourceReference: intFromAny(typedArgs["sourceReference"]),
+	}
+	if source, ok := typedArgs["source"].(map[string]any); ok {
+		parsed.path = stringFromAny(source["path"])
+		if parsed.sourceReference <= 0 {
+			parsed.sourceReference = intFromAny(source["sourceReference"])
+		}
+	}
+	if parsed.path == "" && parsed.sourceReference <= 0 {
+		return sourceArguments{}, false
+	}
+	return parsed, true
+}
+
 func extractSetBreakpointsArguments(args any) (setBreakpointsArguments, bool) {
 	typedArgs, ok := args.(map[string]any)
 	if !ok {
@@ -1346,6 +1588,52 @@ func zeroBasedLines(lines []int) []int {
 		converted = append(converted, line-1)
 	}
 	return converted
+}
+
+func (s *Server) storeSourceText(path string, text []string) {
+	if path == "" || text == nil {
+		return
+	}
+	cloned := append([]string{}, text...)
+	s.sourceTextByPath[path] = cloned
+}
+
+func extractSetPromptType(args any) (int, bool) {
+	switch v := args.(type) {
+	case protocol.SetPromptTypeArgs:
+		return v.Type, true
+	case map[string]any:
+		return intFromAny(v["type"]), true
+	default:
+		return 0, false
+	}
+}
+
+func extractValueTip(args any) (valueTipArgs, bool) {
+	v, ok := args.(map[string]any)
+	if !ok {
+		return valueTipArgs{}, false
+	}
+	return valueTipArgs{
+		tip:   stringSliceFromAny(v["tip"]),
+		class: intFromAny(v["class"]),
+		token: intFromAny(v["token"]),
+	}, true
+}
+
+func (s *Server) dispatchValueTip(valueTip valueTipArgs) {
+	waiter, ok := s.evaluateWaiters[valueTip.token]
+	if !ok {
+		return
+	}
+	delete(s.evaluateWaiters, valueTip.token)
+	select {
+	case waiter <- evaluateResult{
+		text:  strings.Join(valueTip.tip, "\n"),
+		class: valueTip.class,
+	}:
+	default:
+	}
 }
 
 func (s *Server) ensureScopeForFrame(frameID int) (int, bool) {
@@ -1532,6 +1820,23 @@ func boolFromAny(v any) bool {
 func stringFromAny(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func stringSliceFromAny(v any) []string {
+	switch typed := v.(type) {
+	case []string:
+		return append([]string{}, typed...)
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				values = append(values, text)
+			}
+		}
+		return values
+	default:
+		return nil
+	}
 }
 
 func (s *Server) success(req Request) Response {
