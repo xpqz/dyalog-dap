@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stefan/lsp-dap/internal/ride/protocol"
 )
@@ -1567,6 +1568,138 @@ func TestHandleRequest_EvaluateFailsWhenPromptBusy(t *testing.T) {
 	}
 	if len(ride.calls) != 0 {
 		t.Fatalf("expected busy evaluate to avoid RIDE send, got %#v", ride.calls)
+	}
+}
+
+func TestHandleRequest_EvaluateHoverUsesValueTip(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	ride := &mockRideController{}
+	ride.onSend = func(command string, args map[string]any) {
+		if command != "GetValueTip" {
+			return
+		}
+		server.HandleRidePayload(protocol.DecodedPayload{
+			Kind:    protocol.KindCommand,
+			Command: "ValueTip",
+			Args: map[string]any{
+				"tip":   []any{"hover-value"},
+				"class": 2,
+				"token": args["token"],
+			},
+		})
+	}
+	server.SetRideController(ride)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    804,
+			Debugger: true,
+			Tid:      6,
+		},
+	})
+
+	resp, _ := server.HandleRequest(Request{
+		Seq:     82,
+		Command: "evaluate",
+		Arguments: map[string]any{
+			"expression": "foo",
+			"context":    "HOVER",
+			"frameId":    804,
+		},
+	})
+	if !resp.Success {
+		t.Fatalf("expected hover evaluate success, got %s", resp.Message)
+	}
+	body := resp.Body.(EvaluateResponseBody)
+	if body.Result != "hover-value" {
+		t.Fatalf("expected hover value, got %#v", body)
+	}
+}
+
+func TestHandleRequest_EvaluateReplFallsBackToCachedSymbolValue(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+	ride := &mockRideController{
+		sendErrByCommand: map[string]error{
+			"GetValueTip": errors.New("offline"),
+		},
+	}
+	server.SetRideController(ride)
+
+	server.mu.Lock()
+	server.activeTracerSet = true
+	server.activeTracerWindow = 900
+	server.tracerWindows[900] = tracerWindowState{threadID: 1}
+	server.frameSymbols[900] = frameSymbolsState{
+		order: []string{"foo"},
+		symbols: map[string]frameSymbol{
+			"foo": {
+				name:     "foo",
+				isLocal:  true,
+				value:    "42",
+				class:    2,
+				hasValue: true,
+			},
+		},
+	}
+	server.mu.Unlock()
+
+	resp, _ := server.HandleRequest(Request{
+		Seq:     83,
+		Command: "evaluate",
+		Arguments: map[string]any{
+			"expression": "foo",
+			"context":    "repl",
+			"frameId":    900,
+		},
+	})
+	if !resp.Success {
+		t.Fatalf("expected repl evaluate fallback success, got %s", resp.Message)
+	}
+	body := resp.Body.(EvaluateResponseBody)
+	if body.Result != "42" || body.Type != "nameclass(2)" {
+		t.Fatalf("unexpected repl fallback body: %#v", body)
+	}
+	if len(ride.calls) != 1 || ride.calls[0].command != "GetValueTip" {
+		t.Fatalf("expected repl to attempt GetValueTip before fallback, got %#v", ride.calls)
+	}
+}
+
+func TestHandleRequest_EvaluateWatchTimeoutReturnsActionableError(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+	server.evaluateTimeout = 5 * time.Millisecond
+	ride := &mockRideController{}
+	server.SetRideController(ride)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:    805,
+			Debugger: true,
+			Tid:      7,
+		},
+	})
+
+	resp, _ := server.HandleRequest(Request{
+		Seq:     84,
+		Command: "evaluate",
+		Arguments: map[string]any{
+			"expression": "foo",
+			"context":    "watch",
+			"frameId":    805,
+		},
+	})
+	if resp.Success {
+		t.Fatal("expected watch evaluate timeout to fail")
+	}
+	if !strings.Contains(strings.ToLower(resp.Message), "watch context") {
+		t.Fatalf("expected actionable watch timeout message, got %q", resp.Message)
 	}
 }
 

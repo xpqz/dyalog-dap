@@ -172,6 +172,7 @@ type Server struct {
 	nextVariablesRef   int
 	evaluateWaiters    map[int]chan evaluateResult
 	nextEvaluateToken  int
+	evaluateTimeout    time.Duration
 	frameSymbols       map[int]frameSymbolsState
 	pendingSymbolTips  map[int]pendingSymbolTip
 	nextSymbolTipToken int
@@ -299,6 +300,7 @@ func NewServer() *Server {
 		nextVariablesRef:   1,
 		evaluateWaiters:    map[int]chan evaluateResult{},
 		nextEvaluateToken:  1,
+		evaluateTimeout:    evaluateTimeout,
 		frameSymbols:       map[int]frameSymbolsState{},
 		pendingSymbolTips:  map[int]pendingSymbolTip{},
 		nextSymbolTipToken: 100000,
@@ -660,6 +662,7 @@ func (s *Server) handleEvaluateRequest(req Request) Response {
 	if !ok {
 		return s.failure(req, "evaluate requires expression")
 	}
+	context := normalizeEvaluateContext(args.context)
 
 	s.mu.Lock()
 	if s.state == stateTerminated {
@@ -674,22 +677,34 @@ func (s *Server) handleEvaluateRequest(req Request) Response {
 		s.mu.Unlock()
 		return s.failure(req, "no RIDE controller configured")
 	}
-	if args.context != "watch" && args.context != "repl" && args.context != "hover" {
+	if context != "watch" && context != "repl" && context != "hover" {
 		s.mu.Unlock()
-		return s.failure(req, "evaluate supports repl/watch contexts only")
+		return s.failure(req, "evaluate context must be watch, hover, or repl")
 	}
-	if s.promptTypeSeen && s.promptType == 0 {
+	if s.promptTypeSeen && s.promptType == 0 && context != "repl" {
 		s.mu.Unlock()
-		return s.failure(req, "interpreter is busy; evaluate requires ready prompt")
+		return s.failure(req, "interpreter is busy; watch/hover evaluate requires ready prompt")
 	}
 
 	win := args.frameID
 	if win <= 0 && s.activeTracerSet {
 		win = s.activeTracerWindow
 	}
+	if win <= 0 && context != "repl" {
+		s.mu.Unlock()
+		return s.failure(req, "watch/hover evaluate requires frameId or active tracer window")
+	}
+	if context == "repl" && s.promptTypeSeen && s.promptType == 0 {
+		if result, ok := s.cachedEvaluateResult(win, args.expression); ok {
+			s.mu.Unlock()
+			return s.successWithBody(req, evaluateResultToBody(result))
+		}
+		s.mu.Unlock()
+		return s.failure(req, "interpreter is busy; repl evaluate fallback requires cached symbol value")
+	}
 	if win <= 0 {
 		s.mu.Unlock()
-		return s.failure(req, "evaluate requires frameId or active tracer window")
+		return s.failure(req, "repl evaluate requires frameId, active tracer window, or cached symbol value")
 	}
 
 	token := s.nextEvaluateToken
@@ -697,6 +712,10 @@ func (s *Server) handleEvaluateRequest(req Request) Response {
 	waiter := make(chan evaluateResult, 1)
 	s.evaluateWaiters[token] = waiter
 	controller := s.rideController
+	timeout := s.evaluateTimeout
+	if timeout <= 0 {
+		timeout = evaluateTimeout
+	}
 	s.mu.Unlock()
 
 	if err := controller.SendCommand("GetValueTip", map[string]any{
@@ -709,27 +728,82 @@ func (s *Server) handleEvaluateRequest(req Request) Response {
 	}); err != nil {
 		s.mu.Lock()
 		delete(s.evaluateWaiters, token)
+		result, hasCached := s.cachedEvaluateResult(win, args.expression)
 		s.mu.Unlock()
+		if context == "repl" && hasCached {
+			return s.successWithBody(req, evaluateResultToBody(result))
+		}
 		return s.failure(req, "failed to send GetValueTip")
 	}
 
 	select {
 	case result := <-waiter:
-		typeName := "string"
-		if result.class != 0 {
-			typeName = fmt.Sprintf("nameclass(%d)", result.class)
-		}
-		return s.successWithBody(req, EvaluateResponseBody{
-			Result:             result.text,
-			Type:               typeName,
-			VariablesReference: 0,
-		})
-	case <-time.After(evaluateTimeout):
+		return s.successWithBody(req, evaluateResultToBody(result))
+	case <-time.After(timeout):
 		s.mu.Lock()
 		delete(s.evaluateWaiters, token)
+		cached, hasCached := s.cachedEvaluateResult(win, args.expression)
 		s.mu.Unlock()
-		return s.failure(req, "timed out waiting for ValueTip")
+		if context == "repl" && hasCached {
+			return s.successWithBody(req, evaluateResultToBody(cached))
+		}
+		return s.failure(req, evaluateTimeoutMessage(context))
 	}
+}
+
+func normalizeEvaluateContext(context string) string {
+	normalized := strings.TrimSpace(strings.ToLower(context))
+	if normalized == "" {
+		return "repl"
+	}
+	return normalized
+}
+
+func evaluateResultToBody(result evaluateResult) EvaluateResponseBody {
+	typeName := "string"
+	if result.class != 0 {
+		typeName = fmt.Sprintf("nameclass(%d)", result.class)
+	}
+	return EvaluateResponseBody{
+		Result:             result.text,
+		Type:               typeName,
+		VariablesReference: 0,
+	}
+}
+
+func evaluateTimeoutMessage(context string) string {
+	switch context {
+	case "watch":
+		return "timed out waiting for ValueTip in watch context; ensure interpreter is paused and expression is in scope"
+	case "hover":
+		return "timed out waiting for ValueTip in hover context; ensure interpreter is paused and symbol is in scope"
+	case "repl":
+		return "timed out waiting for ValueTip in repl context; retry with frameId or evaluate a cached symbol"
+	default:
+		return "timed out waiting for ValueTip"
+	}
+}
+
+func (s *Server) cachedEvaluateResult(frameID int, expression string) (evaluateResult, bool) {
+	name := strings.TrimSpace(expression)
+	if !isSymbolName(name) {
+		return evaluateResult{}, false
+	}
+	if frameID <= 0 {
+		return evaluateResult{}, false
+	}
+	state, ok := s.frameSymbols[frameID]
+	if !ok {
+		return evaluateResult{}, false
+	}
+	symbol, ok := state.symbols[name]
+	if !ok || !symbol.hasValue {
+		return evaluateResult{}, false
+	}
+	return evaluateResult{
+		text:  symbol.value,
+		class: symbol.class,
+	}, true
 }
 
 func (s *Server) handleSourceRequest(req Request) Response {

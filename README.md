@@ -130,6 +130,14 @@ DYALOG_RIDE_ADDR=127.0.0.1:4502 go run ./cmd/dap-adapter
 
 Current limitation: VSIX packaging is automated, but Marketplace publication still requires manual publisher credentials/approval.
 
+### Evaluate Context Matrix
+
+- `watch`: strict ValueTip evaluate, requires paused/ready prompt and frame context.
+- `hover`: same semantics as watch, optimized for symbol hover inspection.
+- `repl`: prefers cached symbol fallback for deterministic debug-eval when ValueTip is unavailable; otherwise uses ValueTip path.
+
+Timeout/failure behavior is context-specific and returns actionable errors (no session hang).
+
 ## Day-to-Day Development
 
 ### Standard Validation Loop
