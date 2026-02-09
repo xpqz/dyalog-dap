@@ -2,6 +2,31 @@
 
 Go-based RIDE protocol runtime and DAP adapter foundations for debugging Dyalog APL from VS Code.
 
+## For APL Users (VS Code Debugging)
+
+If you are an APL user and just want debugging to work in VS Code, start here.
+
+Current status (as of February 9, 2026):
+
+- This project has working protocol/runtime layers and live Dyalog smoke coverage.
+- The `dap-adapter` binary is not yet a full long-running stdio DAP server, so a full end-user VS Code debugging session is not available yet.
+
+What you can do today:
+
+1. Verify your Dyalog/RIDE environment is reachable.
+2. Run the live smoke test against a real interpreter.
+3. Capture protocol transcripts for troubleshooting.
+
+Quick live check:
+
+```bash
+export DYALOG_RIDE_ADDR=127.0.0.1:4502
+export DYALOG_RIDE_LAUNCH='RIDE_INIT=SERVE:*:4502 dyalog +s -q'
+go test ./internal/integration/harness -run '^TestLiveDyalog_' -count=1 -v
+```
+
+When this prints `PASS`, the adapter stack is talking to a real Dyalog instance.
+
 ## Getting Started in 5 Minutes
 
 Run this as-is from a clean machine:
@@ -17,6 +42,33 @@ go build ./cmd/dap-adapter
 ```
 
 If all commands pass, your environment is ready.
+
+## Packaging and Installation
+
+### Download prebuilt binaries (recommended)
+
+Packaging is set up for GitHub Releases. For each tagged release, downloadable archives are produced for:
+
+- macOS (`amd64`, `arm64`)
+- Linux (`amd64`, `arm64`)
+- Windows (`amd64`, `arm64`)
+
+Each release includes:
+
+- `dap-adapter` binary (or `dap-adapter.exe` on Windows)
+- `checksums.txt` for integrity verification
+
+Release page:
+
+- `https://github.com/xpqz/dyalog-dap/releases`
+
+### Local packaging command (maintainers)
+
+```bash
+goreleaser release --snapshot --clean
+```
+
+This writes local archives under `dist/` without creating a GitHub release.
 
 ## Quick Command Cheat Sheet
 

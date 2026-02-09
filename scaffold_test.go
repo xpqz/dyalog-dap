@@ -139,3 +139,40 @@ func TestScaffold_HasAssumptionsTraceabilityDoc(t *testing.T) {
 		}
 	}
 }
+
+func TestScaffold_HasGoreleaserConfig(t *testing.T) {
+	data, err := os.ReadFile(".goreleaser.yaml")
+	if err != nil {
+		t.Fatalf("missing .goreleaser.yaml: %v", err)
+	}
+	text := string(data)
+	requiredSnippets := []string{
+		"project_name: dyalog-dap",
+		"main: ./cmd/dap-adapter",
+		"checksum:",
+	}
+	for _, snippet := range requiredSnippets {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected goreleaser config to contain %q", snippet)
+		}
+	}
+}
+
+func TestScaffold_HasReleaseWorkflow(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatalf("missing .github/workflows/release.yml: %v", err)
+	}
+	text := string(data)
+	requiredSnippets := []string{
+		"name: release",
+		"goreleaser/goreleaser-action",
+		"tags:",
+		"v*",
+	}
+	for _, snippet := range requiredSnippets {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected release workflow to contain %q", snippet)
+		}
+	}
+}
