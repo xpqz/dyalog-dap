@@ -308,6 +308,11 @@ go test ./internal/integration/harness -run '^TestLiveDyalog_' -count=1 -v
 
 Transcripts are written under `artifacts/integration/` by default.
 Support triage workflow and bundle handling: `docs/support/triage.md`.
+Bundle summary helper:
+
+```bash
+go run ./cmd/diagnostic-summary --json .dyalog-dap/support/diagnostic-bundle-<timestamp>.json
+```
 
 ## Troubleshooting
 
