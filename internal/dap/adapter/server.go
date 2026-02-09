@@ -3,9 +3,12 @@ package adapter
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/stefan/lsp-dap/internal/ride/protocol"
 )
@@ -135,6 +138,11 @@ const (
 )
 
 const evaluateTimeout = 2 * time.Second
+const localsFetchTimeout = 150 * time.Millisecond
+const localsFetchPollInterval = 5 * time.Millisecond
+const maxLocalValuePreviewRunes = 80
+const maxLocalValueChildren = 32
+const maxLocalSymbolsPerFrame = 64
 
 // Server is the DAP adapter entry point.
 type Server struct {
@@ -164,6 +172,9 @@ type Server struct {
 	nextVariablesRef   int
 	evaluateWaiters    map[int]chan evaluateResult
 	nextEvaluateToken  int
+	frameSymbols       map[int]frameSymbolsState
+	pendingSymbolTips  map[int]pendingSymbolTip
+	nextSymbolTipToken int
 	promptType         int
 	promptTypeSeen     bool
 	syntheticThreadIDs map[string]int
@@ -217,6 +228,29 @@ type evaluateResult struct {
 	class int
 }
 
+type frameSymbol struct {
+	name     string
+	isLocal  bool
+	value    string
+	class    int
+	hasValue bool
+}
+
+type frameSymbolsState struct {
+	order   []string
+	symbols map[string]frameSymbol
+}
+
+type pendingSymbolTip struct {
+	frameID int
+	name    string
+}
+
+type symbolTipRequest struct {
+	token int
+	args  map[string]any
+}
+
 // StoppedEventBody is emitted for DAP stopped events synthesized from RIDE lifecycle signals.
 type StoppedEventBody struct {
 	Reason            string `json:"reason"`
@@ -265,6 +299,9 @@ func NewServer() *Server {
 		nextVariablesRef:   1,
 		evaluateWaiters:    map[int]chan evaluateResult{},
 		nextEvaluateToken:  1,
+		frameSymbols:       map[int]frameSymbolsState{},
+		pendingSymbolTips:  map[int]pendingSymbolTip{},
+		nextSymbolTipToken: 100000,
 		syntheticThreadIDs: map[string]int{},
 		nextSyntheticID:    1000000,
 	}
@@ -277,6 +314,7 @@ func (s *Server) SetRideController(controller RideCommandSender) {
 	s.rideController = controller
 	if controller == nil {
 		s.evaluateWaiters = map[int]chan evaluateResult{}
+		s.pendingSymbolTips = map[int]pendingSymbolTip{}
 	}
 }
 
@@ -346,6 +384,8 @@ func (s *Server) HandleRequest(req Request) (Response, []Event) {
 		return s.handleEvaluateRequest(req), nil
 	case "source":
 		return s.handleSourceRequest(req), nil
+	case "scopes":
+		return s.handleScopesRequest(req), nil
 	}
 
 	s.mu.Lock()
@@ -393,8 +433,6 @@ func (s *Server) HandleRequest(req Request) (Response, []Event) {
 		return s.handleThreadsRequest(req), nil
 	case "stackTrace":
 		return s.handleStackTraceRequest(req), nil
-	case "scopes":
-		return s.handleScopesRequest(req), nil
 	case "variables":
 		return s.handleVariablesRequest(req), nil
 	case "setBreakpoints":
@@ -543,27 +581,58 @@ func (s *Server) handleSetBreakpointsRequest(req Request) Response {
 }
 
 func (s *Server) handleScopesRequest(req Request) Response {
-	if s.state != stateAttachedOrLaunched {
-		return s.failure(req, "scopes requires launch or attach")
-	}
-
 	frameID := extractFrameIDArgument(req.Arguments)
 	if frameID <= 0 {
 		return s.failure(req, "scopes requires frameId")
 	}
 
+	s.mu.Lock()
+	if s.state != stateAttachedOrLaunched {
+		s.mu.Unlock()
+		return s.failure(req, "scopes requires launch or attach")
+	}
+	if _, ok := s.tracerWindows[frameID]; !ok {
+		s.mu.Unlock()
+		return s.failure(req, "scopes requires valid frameId")
+	}
+	s.refreshFrameSymbolsLocked(frameID)
+	controller := s.rideController
+	requests := s.prepareSymbolTipRequestsLocked(frameID)
+	s.mu.Unlock()
+
+	for _, request := range requests {
+		if controller == nil {
+			break
+		}
+		if err := controller.SendCommand("GetValueTip", request.args); err != nil {
+			s.mu.Lock()
+			delete(s.pendingSymbolTips, request.token)
+			s.mu.Unlock()
+		}
+	}
+	if len(requests) > 0 {
+		s.waitForSymbolTipRequests(frameID, localsFetchTimeout)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	scopeRef, ok := s.ensureScopeForFrame(frameID)
 	if !ok {
 		return s.failure(req, "scopes requires valid frameId")
 	}
 
-	return s.successWithBody(req, ScopesResponseBody{
-		Scopes: []Scope{{
+	return Response{
+		RequestSeq: req.Seq,
+		Command:    req.Command,
+		Success:    true,
+		Body: ScopesResponseBody{
+			Scopes: []Scope{{
 			Name:               "Locals",
 			VariablesReference: scopeRef,
 			Expensive:          false,
 		}},
-	})
+		},
+	}
 }
 
 func (s *Server) handleVariablesRequest(req Request) Response {
@@ -975,6 +1044,8 @@ func (s *Server) unbindToken(token int) {
 			s.dropVariableReference(scopeRef)
 			delete(s.frameScopeRef, token)
 		}
+		delete(s.frameSymbols, token)
+		s.dropPendingSymbolTipsForFrame(token)
 		delete(s.tracerWindows, token)
 		s.removeTracerToken(token)
 		if s.activeTracerSet && s.activeTracerWindow == token {
@@ -1067,6 +1138,7 @@ func (s *Server) terminateSessionFromRide() {
 	s.activeThreadSet = false
 	s.promptTypeSeen = false
 	s.evaluateWaiters = map[int]chan evaluateResult{}
+	s.pendingSymbolTips = map[int]pendingSymbolTip{}
 }
 
 func (s *Server) resetRuntimeStateForReconnect() {
@@ -1084,6 +1156,9 @@ func (s *Server) resetRuntimeStateForReconnect() {
 	s.variablesByRef = map[int][]Variable{}
 	s.nextVariablesRef = 1
 	s.evaluateWaiters = map[int]chan evaluateResult{}
+	s.frameSymbols = map[int]frameSymbolsState{}
+	s.pendingSymbolTips = map[int]pendingSymbolTip{}
+	s.nextSymbolTipToken = 100000
 	s.promptTypeSeen = false
 }
 
@@ -1598,6 +1673,231 @@ func (s *Server) storeSourceText(path string, text []string) {
 	s.sourceTextByPath[path] = cloned
 }
 
+func (s *Server) refreshFrameSymbolsLocked(frameID int) {
+	binding, hasBinding := s.sourceByToken[frameID]
+	if !hasBinding || binding.path == "" {
+		if _, exists := s.frameSymbols[frameID]; !exists {
+			s.frameSymbols[frameID] = frameSymbolsState{
+				order:   []string{},
+				symbols: map[string]frameSymbol{},
+			}
+		}
+		return
+	}
+	lines, ok := s.sourceTextByPath[binding.path]
+	if !ok {
+		if _, exists := s.frameSymbols[frameID]; !exists {
+			s.frameSymbols[frameID] = frameSymbolsState{
+				order:   []string{},
+				symbols: map[string]frameSymbol{},
+			}
+		}
+		return
+	}
+
+	order, localSet := extractVisibleSymbols(lines)
+	if len(order) > maxLocalSymbolsPerFrame {
+		order = append([]string{}, order[:maxLocalSymbolsPerFrame]...)
+	}
+
+	existing := s.frameSymbols[frameID]
+	state := frameSymbolsState{
+		order:   append([]string{}, order...),
+		symbols: map[string]frameSymbol{},
+	}
+	scopeNeedsReset := len(existing.order) != len(order)
+	if !scopeNeedsReset {
+		for i := range order {
+			if existing.order[i] != order[i] {
+				scopeNeedsReset = true
+				break
+			}
+		}
+	}
+	for _, name := range order {
+		symbol := frameSymbol{
+			name:    name,
+			isLocal: localSet[name],
+		}
+		if existingSymbol, exists := existing.symbols[name]; exists {
+			symbol.value = existingSymbol.value
+			symbol.class = existingSymbol.class
+			symbol.hasValue = existingSymbol.hasValue
+			if existingSymbol.isLocal != symbol.isLocal {
+				scopeNeedsReset = true
+			}
+		}
+		state.symbols[name] = symbol
+	}
+	if scopeNeedsReset {
+		if ref, exists := s.frameScopeRef[frameID]; exists {
+			s.dropVariableReference(ref)
+			delete(s.frameScopeRef, frameID)
+		}
+	}
+	s.frameSymbols[frameID] = state
+}
+
+func (s *Server) prepareSymbolTipRequestsLocked(frameID int) []symbolTipRequest {
+	if s.rideController == nil {
+		return nil
+	}
+	if s.promptTypeSeen && s.promptType == 0 {
+		return nil
+	}
+	state, ok := s.frameSymbols[frameID]
+	if !ok || len(state.order) == 0 {
+		return nil
+	}
+
+	requests := make([]symbolTipRequest, 0, len(state.order))
+	for _, name := range state.order {
+		symbol, exists := state.symbols[name]
+		if !exists || symbol.hasValue {
+			continue
+		}
+
+		token := s.nextSymbolTipToken
+		s.nextSymbolTipToken++
+		s.pendingSymbolTips[token] = pendingSymbolTip{
+			frameID: frameID,
+			name:    name,
+		}
+		requests = append(requests, symbolTipRequest{
+			token: token,
+			args: map[string]any{
+				"win":       frameID,
+				"line":      name,
+				"pos":       utf8.RuneCountInString(name),
+				"maxWidth":  maxLocalValuePreviewRunes,
+				"maxHeight": maxLocalValueChildren,
+				"token":     token,
+			},
+		})
+	}
+	return requests
+}
+
+func (s *Server) waitForSymbolTipRequests(frameID int, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if time.Now().After(deadline) {
+			s.mu.Lock()
+			s.dropPendingSymbolTipsForFrame(frameID)
+			s.mu.Unlock()
+			return
+		}
+
+		s.mu.Lock()
+		pending := false
+		for _, request := range s.pendingSymbolTips {
+			if request.frameID == frameID {
+				pending = true
+				break
+			}
+		}
+		s.mu.Unlock()
+		if !pending {
+			return
+		}
+		time.Sleep(localsFetchPollInterval)
+	}
+}
+
+func extractVisibleSymbols(lines []string) ([]string, map[string]bool) {
+	locals := map[string]bool{}
+	assigned := map[string]bool{}
+
+	if len(lines) > 0 {
+		parts := strings.Split(lines[0], ";")
+		for i := 1; i < len(parts); i++ {
+			name := strings.TrimSpace(parts[i])
+			if isSymbolName(name) {
+				locals[name] = true
+			}
+		}
+	}
+
+	for _, line := range lines {
+		for _, name := range extractAssignedSymbols(line) {
+			assigned[name] = true
+		}
+	}
+
+	names := make([]string, 0, len(locals)+len(assigned))
+	seen := map[string]bool{}
+	for name := range locals {
+		seen[name] = true
+		names = append(names, name)
+	}
+	for name := range assigned {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, locals
+}
+
+func extractAssignedSymbols(line string) []string {
+	runes := []rune(line)
+	names := make([]string, 0, 4)
+	for i, r := range runes {
+		if r != '←' {
+			continue
+		}
+		start := i - 1
+		for start >= 0 && isSymbolRune(runes[start]) {
+			start--
+		}
+		start++
+		if start >= i {
+			continue
+		}
+		name := string(runes[start:i])
+		if isSymbolName(name) {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func isSymbolName(name string) bool {
+	if name == "" {
+		return false
+	}
+	runes := []rune(name)
+	if len(runes) == 0 {
+		return false
+	}
+	for i, r := range runes {
+		if !isSymbolRune(r) {
+			return false
+		}
+		if i == 0 && unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isSymbolRune(r rune) bool {
+	if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		return true
+	}
+	switch r {
+	case '_', '⎕', '∆', '⍙':
+		return true
+	default:
+		return false
+	}
+}
+
 func extractSetPromptType(args any) (int, bool) {
 	switch v := args.(type) {
 	case protocol.SetPromptTypeArgs:
@@ -1623,17 +1923,37 @@ func extractValueTip(args any) (valueTipArgs, bool) {
 
 func (s *Server) dispatchValueTip(valueTip valueTipArgs) {
 	waiter, ok := s.evaluateWaiters[valueTip.token]
+	if ok {
+		delete(s.evaluateWaiters, valueTip.token)
+		select {
+		case waiter <- evaluateResult{
+			text:  strings.Join(valueTip.tip, "\n"),
+			class: valueTip.class,
+		}:
+		default:
+		}
+		return
+	}
+
+	pending, exists := s.pendingSymbolTips[valueTip.token]
+	if !exists {
+		return
+	}
+	delete(s.pendingSymbolTips, valueTip.token)
+
+	state, ok := s.frameSymbols[pending.frameID]
 	if !ok {
 		return
 	}
-	delete(s.evaluateWaiters, valueTip.token)
-	select {
-	case waiter <- evaluateResult{
-		text:  strings.Join(valueTip.tip, "\n"),
-		class: valueTip.class,
-	}:
-	default:
+	symbol, ok := state.symbols[pending.name]
+	if !ok {
+		return
 	}
+	symbol.value = strings.Join(valueTip.tip, "\n")
+	symbol.class = valueTip.class
+	symbol.hasValue = true
+	state.symbols[pending.name] = symbol
+	s.frameSymbols[pending.frameID] = state
 }
 
 func (s *Server) ensureScopeForFrame(frameID int) (int, bool) {
@@ -1701,8 +2021,16 @@ func (s *Server) buildFrameVariables(frameID int) []Variable {
 		})
 	}
 	siChildrenRef := s.allocateVariablesReference(siChildren)
+	localsChildren, globalsChildren := s.buildFrameSymbolVariables(frameID)
+	localsRef := s.allocateVariablesReference(localsChildren)
 
-	return []Variable{
+	variables := []Variable{
+		{
+			Name:               "locals",
+			Value:              fmt.Sprintf("[%d]", len(localsChildren)),
+			Type:               "array",
+			VariablesReference: localsRef,
+		},
 		{Name: "frameName", Value: frame.name, Type: "string", VariablesReference: 0},
 		{Name: "line", Value: fmt.Sprintf("%d", oneBased(frame.line)), Type: "number", VariablesReference: 0},
 		{Name: "column", Value: fmt.Sprintf("%d", oneBased(frame.column)), Type: "number", VariablesReference: 0},
@@ -1712,6 +2040,144 @@ func (s *Server) buildFrameVariables(frameID int) []Variable {
 		{Name: "source", Value: "Object", Type: "object", VariablesReference: sourceChildrenRef},
 		{Name: "siStack", Value: fmt.Sprintf("[%d]", len(siDescriptions)), Type: "array", VariablesReference: siChildrenRef},
 	}
+	if len(globalsChildren) > 0 {
+		globalsRef := s.allocateVariablesReference(globalsChildren)
+		variables = append([]Variable{{
+			Name:               "globals",
+			Value:              fmt.Sprintf("[%d]", len(globalsChildren)),
+			Type:               "array",
+			VariablesReference: globalsRef,
+		}}, variables...)
+	}
+	return variables
+}
+
+func (s *Server) buildFrameSymbolVariables(frameID int) ([]Variable, []Variable) {
+	state, ok := s.frameSymbols[frameID]
+	if !ok {
+		return []Variable{}, []Variable{}
+	}
+	locals := []Variable{}
+	globals := []Variable{}
+	for _, name := range state.order {
+		symbol, exists := state.symbols[name]
+		if !exists {
+			continue
+		}
+		variable := s.buildInspectableSymbolVariable(symbol)
+		if symbol.isLocal {
+			locals = append(locals, variable)
+		} else {
+			globals = append(globals, variable)
+		}
+	}
+	return locals, globals
+}
+
+func (s *Server) buildInspectableSymbolVariable(symbol frameSymbol) Variable {
+	if !symbol.hasValue {
+		return Variable{
+			Name:               symbol.name,
+			Value:              "(loading value)",
+			Type:               "unknown",
+			VariablesReference: 0,
+		}
+	}
+
+	valueType := "string"
+	if symbol.class != 0 {
+		valueType = fmt.Sprintf("nameclass(%d)", symbol.class)
+	}
+
+	preview, children := buildValuePreviewAndChildren(symbol.value)
+	childRef := 0
+	if len(children) > 0 {
+		childRef = s.allocateVariablesReference(children)
+	}
+
+	return Variable{
+		Name:               symbol.name,
+		Value:              preview,
+		Type:               valueType,
+		VariablesReference: childRef,
+	}
+}
+
+func buildValuePreviewAndChildren(value string) (string, []Variable) {
+	if value == "" {
+		return "", []Variable{}
+	}
+	lines := strings.Split(value, "\n")
+	firstLine := lines[0]
+	preview := truncateRunes(firstLine, maxLocalValuePreviewRunes)
+	if len(lines) > 1 {
+		preview = fmt.Sprintf("%s … (+%d lines)", truncateRunes(firstLine, maxLocalValuePreviewRunes/2), len(lines)-1)
+	}
+
+	hasLongSingleLine := len(lines) == 1 && utf8.RuneCountInString(firstLine) > maxLocalValuePreviewRunes
+	if len(lines) == 1 && !hasLongSingleLine {
+		return preview, []Variable{}
+	}
+
+	children := make([]Variable, 0, maxLocalValueChildren+1)
+	entries := lines
+	if hasLongSingleLine {
+		entries = chunkByRunes(firstLine, maxLocalValuePreviewRunes)
+	}
+	limit := len(entries)
+	if limit > maxLocalValueChildren {
+		limit = maxLocalValueChildren
+	}
+	for i := 0; i < limit; i++ {
+		children = append(children, Variable{
+			Name:               fmt.Sprintf("[%d]", i),
+			Value:              truncateRunes(entries[i], maxLocalValuePreviewRunes),
+			Type:               "string",
+			VariablesReference: 0,
+		})
+	}
+	if len(entries) > maxLocalValueChildren {
+		children = append(children, Variable{
+			Name:               "[...]",
+			Value:              fmt.Sprintf("%d more entries", len(entries)-maxLocalValueChildren),
+			Type:               "string",
+			VariablesReference: 0,
+		})
+	}
+	return preview, children
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return value
+	}
+	if utf8.RuneCountInString(value) <= limit {
+		return value
+	}
+	runes := []rune(value)
+	if limit <= 1 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-1]) + "…"
+}
+
+func chunkByRunes(value string, chunkSize int) []string {
+	if chunkSize <= 0 {
+		return []string{value}
+	}
+	runes := []rune(value)
+	if len(runes) <= chunkSize {
+		return []string{value}
+	}
+	chunks := make([]string, 0, len(runes)/chunkSize+1)
+	for start := 0; start < len(runes); start += chunkSize {
+		end := start + chunkSize
+		if end > len(runes) {
+			end = len(runes)
+		}
+		chunks = append(chunks, string(runes[start:end]))
+	}
+	return chunks
 }
 
 func (s *Server) allocateVariablesReference(variables []Variable) int {
@@ -1742,6 +2208,14 @@ func (s *Server) dropVariableReference(ref int) {
 	for _, variable := range variables {
 		if variable.VariablesReference > 0 {
 			s.dropVariableReference(variable.VariablesReference)
+		}
+	}
+}
+
+func (s *Server) dropPendingSymbolTipsForFrame(frameID int) {
+	for token, pending := range s.pendingSymbolTips {
+		if pending.frameID == frameID {
+			delete(s.pendingSymbolTips, token)
 		}
 	}
 }

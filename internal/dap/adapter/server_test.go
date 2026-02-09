@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stefan/lsp-dap/internal/ride/protocol"
@@ -1180,6 +1181,284 @@ func TestHandleRequest_VariablesEmptyArrayReturnsEmptySlice(t *testing.T) {
 	}
 	if len(siBody.Variables) != 0 {
 		t.Fatalf("expected zero siStack children, got %#v", siBody.Variables)
+	}
+}
+
+func TestHandleRequest_ScopesAndVariablesExposeLocalsAndGlobalsCategories(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	ride := &mockRideController{
+		onSend: func(command string, args map[string]any) {
+			if command != "GetValueTip" {
+				return
+			}
+			name := args["line"].(string)
+			token := args["token"]
+			reply := []any{"0"}
+			switch name {
+			case "a":
+				reply = []any{"1"}
+			case "b":
+				reply = []any{"2 3 4"}
+			case "g":
+				reply = []any{"99"}
+			}
+			server.HandleRidePayload(protocol.DecodedPayload{
+				Kind:    protocol.KindCommand,
+				Command: "ValueTip",
+				Args: map[string]any{
+					"tip":   reply,
+					"class": 2,
+					"token": token,
+				},
+			})
+		},
+	}
+	server.SetRideController(ride)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:         512,
+			Debugger:      true,
+			Tid:           4,
+			Name:          "TopFn",
+			Filename:      "/ws/src/top.apl",
+			CurrentRow:    3,
+			CurrentColumn: 2,
+			Text: []string{
+				"TopFn;a;b",
+				"a←1",
+				"g←a+b",
+			},
+		},
+	})
+
+	scopesResp, _ := server.HandleRequest(Request{
+		Seq:     200,
+		Command: "scopes",
+		Arguments: map[string]any{
+			"frameId": 512,
+		},
+	})
+	if !scopesResp.Success {
+		t.Fatalf("expected scopes success, got %s", scopesResp.Message)
+	}
+	scopesBody := scopesResp.Body.(ScopesResponseBody)
+	scopeRef := scopesBody.Scopes[0].VariablesReference
+
+	varsResp, _ := server.HandleRequest(Request{
+		Seq:     201,
+		Command: "variables",
+		Arguments: map[string]any{
+			"variablesReference": scopeRef,
+		},
+	})
+	if !varsResp.Success {
+		t.Fatalf("expected variables success, got %s", varsResp.Message)
+	}
+	body := varsResp.Body.(VariablesResponseBody)
+	localsRef := 0
+	globalsRef := 0
+	for _, variable := range body.Variables {
+		if variable.Name == "locals" {
+			localsRef = variable.VariablesReference
+		}
+		if variable.Name == "globals" {
+			globalsRef = variable.VariablesReference
+		}
+	}
+	if localsRef <= 0 {
+		t.Fatalf("expected locals category variable, got %#v", body.Variables)
+	}
+	if globalsRef <= 0 {
+		t.Fatalf("expected globals category variable, got %#v", body.Variables)
+	}
+
+	localsResp, _ := server.HandleRequest(Request{
+		Seq:     202,
+		Command: "variables",
+		Arguments: map[string]any{
+			"variablesReference": localsRef,
+		},
+	})
+	if !localsResp.Success {
+		t.Fatalf("expected locals variables success, got %s", localsResp.Message)
+	}
+	localsBody := localsResp.Body.(VariablesResponseBody)
+	if len(localsBody.Variables) == 0 {
+		t.Fatal("expected local symbols")
+	}
+	localValues := map[string]string{}
+	for _, variable := range localsBody.Variables {
+		localValues[variable.Name] = variable.Value
+	}
+	if localValues["a"] != "1" {
+		t.Fatalf("expected a=1, got %#v", localsBody.Variables)
+	}
+	if localValues["b"] != "2 3 4" {
+		t.Fatalf("expected b=2 3 4, got %#v", localsBody.Variables)
+	}
+
+	globalsResp, _ := server.HandleRequest(Request{
+		Seq:     203,
+		Command: "variables",
+		Arguments: map[string]any{
+			"variablesReference": globalsRef,
+		},
+	})
+	if !globalsResp.Success {
+		t.Fatalf("expected globals variables success, got %s", globalsResp.Message)
+	}
+	globalsBody := globalsResp.Body.(VariablesResponseBody)
+	if len(globalsBody.Variables) != 1 || globalsBody.Variables[0].Name != "g" || globalsBody.Variables[0].Value != "99" {
+		t.Fatalf("expected one global g=99, got %#v", globalsBody.Variables)
+	}
+}
+
+func TestHandleRequest_LocalVariableLongValueIsExpandableAndStableAcrossRefresh(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	longLines := make([]string, 0, maxLocalValueChildren+8)
+	for i := 0; i < maxLocalValueChildren+8; i++ {
+		longLines = append(longLines, strings.Repeat("1234567890", 4))
+	}
+	longValue := strings.Join(longLines, "\n")
+
+	ride := &mockRideController{
+		onSend: func(command string, args map[string]any) {
+			if command != "GetValueTip" {
+				return
+			}
+			if args["line"] != "a" {
+				return
+			}
+			server.HandleRidePayload(protocol.DecodedPayload{
+				Kind:    protocol.KindCommand,
+				Command: "ValueTip",
+				Args: map[string]any{
+					"tip":   strings.Split(longValue, "\n"),
+					"class": 2,
+					"token": args["token"],
+				},
+			})
+		},
+	}
+	server.SetRideController(ride)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:         513,
+			Debugger:      true,
+			Tid:           4,
+			Name:          "TopFn",
+			Filename:      "/ws/src/top.apl",
+			CurrentRow:    3,
+			CurrentColumn: 2,
+			Text: []string{
+				"TopFn;a",
+				"a←1",
+			},
+		},
+	})
+
+	scopesResp, _ := server.HandleRequest(Request{
+		Seq:     210,
+		Command: "scopes",
+		Arguments: map[string]any{
+			"frameId": 513,
+		},
+	})
+	if !scopesResp.Success {
+		t.Fatalf("expected scopes success, got %s", scopesResp.Message)
+	}
+	scopeRef := scopesResp.Body.(ScopesResponseBody).Scopes[0].VariablesReference
+
+	scopesResp2, _ := server.HandleRequest(Request{
+		Seq:     211,
+		Command: "scopes",
+		Arguments: map[string]any{
+			"frameId": 513,
+		},
+	})
+	if !scopesResp2.Success {
+		t.Fatalf("expected second scopes success, got %s", scopesResp2.Message)
+	}
+	scopeRef2 := scopesResp2.Body.(ScopesResponseBody).Scopes[0].VariablesReference
+	if scopeRef2 != scopeRef {
+		t.Fatalf("expected stable scope variablesReference %d, got %d", scopeRef, scopeRef2)
+	}
+
+	scopeVarsResp, _ := server.HandleRequest(Request{
+		Seq:     212,
+		Command: "variables",
+		Arguments: map[string]any{
+			"variablesReference": scopeRef,
+		},
+	})
+	if !scopeVarsResp.Success {
+		t.Fatalf("expected scope variables success, got %s", scopeVarsResp.Message)
+	}
+	localsRef := 0
+	for _, variable := range scopeVarsResp.Body.(VariablesResponseBody).Variables {
+		if variable.Name == "locals" {
+			localsRef = variable.VariablesReference
+		}
+	}
+	if localsRef <= 0 {
+		t.Fatalf("expected locals ref in scope vars, got %#v", scopeVarsResp.Body)
+	}
+
+	localsResp, _ := server.HandleRequest(Request{
+		Seq:     213,
+		Command: "variables",
+		Arguments: map[string]any{
+			"variablesReference": localsRef,
+		},
+	})
+	if !localsResp.Success {
+		t.Fatalf("expected locals variables success, got %s", localsResp.Message)
+	}
+	var target Variable
+	found := false
+	for _, variable := range localsResp.Body.(VariablesResponseBody).Variables {
+		if variable.Name == "a" {
+			target = variable
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected local variable a, got %#v", localsResp.Body)
+	}
+	if target.VariablesReference <= 0 {
+		t.Fatalf("expected expandable long value for a, got %#v", target)
+	}
+	if !strings.Contains(target.Value, "…") {
+		t.Fatalf("expected truncated preview with ellipsis, got %#v", target)
+	}
+
+	childrenResp, _ := server.HandleRequest(Request{
+		Seq:     214,
+		Command: "variables",
+		Arguments: map[string]any{
+			"variablesReference": target.VariablesReference,
+		},
+	})
+	if !childrenResp.Success {
+		t.Fatalf("expected child variables success, got %s", childrenResp.Message)
+	}
+	children := childrenResp.Body.(VariablesResponseBody).Variables
+	if len(children) == 0 {
+		t.Fatal("expected paginated child entries for long value")
+	}
+	if len(children) > maxLocalValueChildren+1 {
+		t.Fatalf("expected child pagination cap, got %d entries", len(children))
 	}
 }
 

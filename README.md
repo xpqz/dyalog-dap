@@ -123,6 +123,7 @@ DYALOG_RIDE_ADDR=127.0.0.1:4502 go run ./cmd/dap-adapter
 - Prompt-aware session dispatcher with queue/allow-list semantics
 - DAP adapter core lifecycle, run control, thread/stack, breakpoint mapping
 - DAP source retrieval and evaluate (watch/repl via ValueTip path)
+- Practical locals/globals inspection model with value-tip-backed symbol values and expandable/truncated large values
 - Long-running stdio DAP server entrypoint (`cmd/dap-adapter`)
 - Integration harness with protocol transcript artifacts
 - CI gating + VS Code smoke workflow scaffolding
