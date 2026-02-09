@@ -184,8 +184,8 @@ func TestScaffold_HasVSCodeExtensionDebuggerContribution(t *testing.T) {
 	}
 
 	var pkg struct {
-		Main         string `json:"main"`
-		Engines      struct {
+		Main    string `json:"main"`
+		Engines struct {
 			VSCode string `json:"vscode"`
 		} `json:"engines"`
 		ActivationEvents []string `json:"activationEvents"`
@@ -383,13 +383,13 @@ func TestScaffold_HasExtensionSetupAndDiagnosticsCommands(t *testing.T) {
 				Command string `json:"command"`
 				Title   string `json:"title"`
 			} `json:"commands"`
-				Configuration struct {
-					Properties map[string]struct {
-						Type        string `json:"type"`
-						Default     any    `json:"default"`
-						Description string `json:"description"`
-					} `json:"properties"`
-				} `json:"configuration"`
+			Configuration struct {
+				Properties map[string]struct {
+					Type        string `json:"type"`
+					Default     any    `json:"default"`
+					Description string `json:"description"`
+				} `json:"properties"`
+			} `json:"configuration"`
 		} `json:"contributes"`
 	}
 	if err := json.Unmarshal(data, &pkg); err != nil {
@@ -869,6 +869,36 @@ func TestScaffold_HasReleaseChecklistTemplateAndMetadataValidation(t *testing.T)
 	for _, snippet := range requiredWorkflowSnippets {
 		if !strings.Contains(workflowText, snippet) {
 			t.Fatalf("expected release workflow to contain %q", snippet)
+		}
+	}
+}
+
+func TestScaffold_HasSupportIntakeTemplateAndBundleSummarizer(t *testing.T) {
+	requiredFiles := []string{
+		".github/ISSUE_TEMPLATE/diagnostic-support.yml",
+		"cmd/diagnostic-summary/main.go",
+		"internal/support/diagbundle/summary.go",
+		"internal/support/diagbundle/summary_test.go",
+	}
+	for _, file := range requiredFiles {
+		if _, err := os.Stat(file); err != nil {
+			t.Fatalf("missing %s: %v", file, err)
+		}
+	}
+
+	triage, err := os.ReadFile("docs/support/triage.md")
+	if err != nil {
+		t.Fatalf("missing docs/support/triage.md: %v", err)
+	}
+	triageText := strings.ToLower(string(triage))
+	triageRequired := []string{
+		"diagnostic-summary",
+		"issue template",
+		"first-pass",
+	}
+	for _, snippet := range triageRequired {
+		if !strings.Contains(triageText, snippet) {
+			t.Fatalf("expected triage doc to contain %q", snippet)
 		}
 	}
 }

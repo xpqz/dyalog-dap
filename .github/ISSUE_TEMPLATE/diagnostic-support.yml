@@ -1,0 +1,66 @@
+name: Diagnostic Support Report
+description: Report a debugging/support issue with diagnostic bundle artifacts
+title: "[support] "
+labels:
+  - support
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Include a diagnostic bundle and summary to speed first-pass triage.
+        Run: `go run ./cmd/diagnostic-summary --json <bundle.json>`
+
+  - type: input
+    id: dyalog_version
+    attributes:
+      label: Dyalog Version
+      description: Example: 19.0 Unicode 64-bit
+      placeholder: "19.0 ..."
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and architecture
+      placeholder: "macOS arm64 / Linux amd64 / Windows amd64"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal Reproduction
+      description: APL code steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostic_bundle_path
+    attributes:
+      label: Diagnostic Bundle
+      description: Attach `.dyalog-dap/support/diagnostic-bundle-*.json` and paste its filename here.
+      placeholder: diagnostic-bundle-2026-02-09T...
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary_output
+    attributes:
+      label: diagnostic-summary Output
+      description: Paste command output from `go run ./cmd/diagnostic-summary --json <bundle.json>`
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: transcripts
+    attributes:
+      label: Transcript Artifacts
+      description: Attach referenced transcript files or explain why unavailable.
+    validations:
+      required: true

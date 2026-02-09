@@ -45,6 +45,20 @@ Expected outputs from first-pass:
 - whether reproduction appears deterministic
 - required follow-up artifacts (full transcript files, minimal repro workspace, exact Dyalog version/build)
 
+Use the bundle summarizer for consistent first-pass extraction:
+
+```bash
+go run ./cmd/diagnostic-summary <bundle.json>
+```
+
+or machine-readable output:
+
+```bash
+go run ./cmd/diagnostic-summary --json <bundle.json>
+```
+
+The summary highlights probable incident class and missing artifacts.
+
 ## 4. Escalation package
 
 When escalating beyond first-pass, include:
@@ -55,3 +69,11 @@ When escalating beyond first-pass, include:
 - Dyalog version/platform details
 
 This keeps triage consistent and minimizes back-and-forth with the reporter.
+
+## 5. Intake template
+
+For new incidents, use issue template:
+
+- `.github/ISSUE_TEMPLATE/diagnostic-support.yml`
+
+This ensures reports include bundle attachment, diagnostic-summary output, reproduction steps, and transcript artifacts.
