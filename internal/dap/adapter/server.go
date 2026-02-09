@@ -214,6 +214,13 @@ func (s *Server) SetPauseFallback(fallback func() error) {
 	s.pauseFallback = fallback
 }
 
+// CanLaunchOrAttach reports whether launch/attach is currently valid.
+func (s *Server) CanLaunchOrAttach() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state == stateInitialized
+}
+
 // HandleRideReconnect resets transient runtime state and requests window layout rebuild.
 func (s *Server) HandleRideReconnect() []Event {
 	s.mu.Lock()
