@@ -1,0 +1,38 @@
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Build output directories
+bin/
+build/
+dist/
+
+# Coverage
+coverage.out
+*.coverprofile
+
+# Go workspace files (optional/local)
+go.work
+go.work.sum
+
+# Go/tool caches
+.gocache/
+.cache/
+
+# Environment/local metadata
+.env
+.skis/
+
+# macOS metadata
+.DS_Store
+
+# IDE metadata
+.idea/
+
+# Local reference implementations (not part of adapter source)
+reference/
