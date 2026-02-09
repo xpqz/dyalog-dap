@@ -27,7 +27,9 @@ var (
 
 // Client manages low-level RIDE transport interactions.
 type Client struct {
-	mu            sync.Mutex
+	mu            sync.RWMutex
+	readMu        sync.Mutex
+	writeMu       sync.Mutex
 	conn          net.Conn
 	rd            *bufio.Reader
 	trafficLogger TrafficLogger
@@ -70,40 +72,50 @@ func (c *Client) SetTrafficLogger(logger TrafficLogger) {
 
 // WritePayload writes one framed RIDE payload.
 func (c *Client) WritePayload(payload string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 
-	if c.conn == nil {
+	c.mu.RLock()
+	conn := c.conn
+	logger := c.trafficLogger
+	c.mu.RUnlock()
+
+	if conn == nil {
 		return ErrNoConnection
 	}
 
 	frameLen := uint32(len(payload) + 8)
-	if err := binary.Write(c.conn, binary.BigEndian, frameLen); err != nil {
+	if err := binary.Write(conn, binary.BigEndian, frameLen); err != nil {
 		return fmt.Errorf("write frame length: %w", err)
 	}
-	if _, err := io.WriteString(c.conn, rideMagic); err != nil {
+	if _, err := io.WriteString(conn, rideMagic); err != nil {
 		return fmt.Errorf("write frame magic: %w", err)
 	}
-	if _, err := io.WriteString(c.conn, payload); err != nil {
+	if _, err := io.WriteString(conn, payload); err != nil {
 		return fmt.Errorf("write payload: %w", err)
 	}
-	if c.trafficLogger != nil {
-		c.trafficLogger.LogTraffic(DirectionOutbound, payload)
+	if logger != nil {
+		logger.LogTraffic(DirectionOutbound, payload)
 	}
 	return nil
 }
 
 // ReadPayload reads one framed RIDE payload.
 func (c *Client) ReadPayload() (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
 
-	if c.rd == nil {
+	c.mu.RLock()
+	rd := c.rd
+	logger := c.trafficLogger
+	c.mu.RUnlock()
+
+	if rd == nil {
 		return "", ErrNoConnection
 	}
 
 	var frameLen uint32
-	if err := binary.Read(c.rd, binary.BigEndian, &frameLen); err != nil {
+	if err := binary.Read(rd, binary.BigEndian, &frameLen); err != nil {
 		return "", fmt.Errorf("read frame length: %w", err)
 	}
 	if frameLen < 8 {
@@ -111,15 +123,15 @@ func (c *Client) ReadPayload() (string, error) {
 	}
 
 	body := make([]byte, int(frameLen)-4)
-	if _, err := io.ReadFull(c.rd, body); err != nil {
+	if _, err := io.ReadFull(rd, body); err != nil {
 		return "", fmt.Errorf("read frame body: %w", err)
 	}
 	if string(body[:4]) != rideMagic {
 		return "", ErrInvalidMagic
 	}
 	payload := string(body[4:])
-	if c.trafficLogger != nil {
-		c.trafficLogger.LogTraffic(DirectionInbound, payload)
+	if logger != nil {
+		logger.LogTraffic(DirectionInbound, payload)
 	}
 	return payload, nil
 }

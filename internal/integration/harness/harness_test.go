@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	dapadapter "github.com/stefan/lsp-dap/internal/dap/adapter"
 	"github.com/stefan/lsp-dap/internal/ride/protocol"
 	"github.com/stefan/lsp-dap/internal/ride/sessionstate"
 )
@@ -262,6 +263,168 @@ func TestHarness_ExecutePromptTransitionLifecycle(t *testing.T) {
 	}
 }
 
+func TestIntegration_TracerLifecycleAndSteppingControls(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+
+		if err := runHandshake(conn); err != nil {
+			serverErr <- err
+			return
+		}
+
+		if err := writeFrame(conn, `["OpenWindow",{"token":910,"debugger":1,"tid":7,"filename":"/ws/src/trace.apl"}]`); err != nil {
+			serverErr <- err
+			return
+		}
+		if err := writeFrame(conn, `["SetHighlightLine",{"win":910,"line":5,"end_line":5,"start_col":1,"end_col":1}]`); err != nil {
+			serverErr <- err
+			return
+		}
+
+		stepPayload, err := readFrame(conn)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		stepCommand, err := decodeCommandName(stepPayload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if stepCommand != "RunCurrentLine" {
+			serverErr <- fmt.Errorf("expected RunCurrentLine, got %q", stepCommand)
+			return
+		}
+		win, err := decodeCommandWin(stepPayload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if win != 910 {
+			serverErr <- fmt.Errorf("expected step win=910, got %d", win)
+			return
+		}
+
+		if err := writeFrame(conn, `["CloseWindow",{"win":910}]`); err != nil {
+			serverErr <- err
+			return
+		}
+
+		serverErr <- nil
+	}()
+
+	h := New(Config{
+		RideAddr:       ln.Addr().String(),
+		ConnectTimeout: 2 * time.Second,
+		TranscriptDir:  t.TempDir(),
+	})
+	client, err := h.Start(context.Background(), t.Name())
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer h.Close()
+
+	dispatcher := sessionstate.NewDispatcher(client, protocol.NewCodec())
+	dispatcherEvents, _ := dispatcher.Subscribe(32)
+
+	dispatcherCtx, cancelDispatcher := context.WithCancel(context.Background())
+	defer cancelDispatcher()
+	dispatcherDone := make(chan struct{})
+	go func() {
+		dispatcher.Run(dispatcherCtx)
+		close(dispatcherDone)
+	}()
+
+	adapter := dapadapter.NewServer()
+	adapter.SetRideController(dispatcher)
+
+	if resp, _ := adapter.HandleRequest(dapadapter.Request{Seq: 1, Command: "initialize"}); !resp.Success {
+		t.Fatalf("adapter initialize failed: %s", resp.Message)
+	}
+	if resp, _ := adapter.HandleRequest(dapadapter.Request{Seq: 2, Command: "launch"}); !resp.Success {
+		t.Fatalf("adapter launch failed: %s", resp.Message)
+	}
+
+	highlightSeen := make(chan struct{})
+	closeSeen := make(chan struct{})
+	bridgeDone := make(chan struct{})
+	go func() {
+		defer close(bridgeDone)
+		for {
+			select {
+			case event := <-dispatcherEvents:
+				_ = adapter.HandleRidePayload(event)
+				if event.Command == "SetHighlightLine" {
+					select {
+					case <-highlightSeen:
+					default:
+						close(highlightSeen)
+					}
+				}
+				if event.Command == "CloseWindow" {
+					select {
+					case <-closeSeen:
+					default:
+						close(closeSeen)
+					}
+				}
+			case <-dispatcherCtx.Done():
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-highlightSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for SetHighlightLine")
+	}
+
+	stepResp, _ := adapter.HandleRequest(dapadapter.Request{Seq: 3, Command: "next"})
+	if !stepResp.Success {
+		t.Fatalf("expected next success, got %s", stepResp.Message)
+	}
+
+	select {
+	case <-closeSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for CloseWindow")
+	}
+
+	continueResp, _ := adapter.HandleRequest(dapadapter.Request{Seq: 4, Command: "continue"})
+	if continueResp.Success {
+		t.Fatal("expected continue to fail after tracer window close")
+	}
+
+	cancelDispatcher()
+	select {
+	case <-dispatcherDone:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("dispatcher did not stop")
+	}
+	select {
+	case <-bridgeDone:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("bridge did not stop")
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("fake server assertions failed: %v", err)
+	}
+}
+
 func runHandshake(conn net.Conn) error {
 	if err := writeFrame(conn, "SupportedProtocols=2"); err != nil {
 		return err
@@ -320,6 +483,29 @@ func decodeCommandName(payload string) (string, error) {
 		return "", err
 	}
 	return name, nil
+}
+
+func decodeCommandWin(payload string) (int, error) {
+	var arr []json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &arr); err != nil {
+		return 0, err
+	}
+	if len(arr) < 2 {
+		return 0, errors.New("command payload missing args")
+	}
+	var args map[string]any
+	if err := json.Unmarshal(arr[1], &args); err != nil {
+		return 0, err
+	}
+	rawWin, ok := args["win"]
+	if !ok {
+		return 0, errors.New("command args missing win")
+	}
+	win, ok := rawWin.(float64)
+	if !ok {
+		return 0, errors.New("command win is not numeric")
+	}
+	return int(win), nil
 }
 
 func writeFrame(w io.Writer, payload string) error {
