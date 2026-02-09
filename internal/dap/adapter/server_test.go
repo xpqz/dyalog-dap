@@ -906,6 +906,279 @@ func TestHandleRequest_StackTraceWithoutThreadIDFails(t *testing.T) {
 	}
 }
 
+func TestHandleRequest_ScopesRequiresFrameID(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	resp, _ := server.HandleRequest(Request{Seq: 63, Command: "scopes"})
+	if resp.Success {
+		t.Fatal("expected scopes without frameId to fail")
+	}
+}
+
+func TestHandleRequest_ScopesAndVariablesExposeFrameContext(t *testing.T) {
+	ride := &mockRideController{}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "ReplyGetThreads",
+		Args: protocol.ReplyGetThreadsArgs{
+			Threads: []protocol.ThreadInfo{
+				{Tid: 8, Description: "Main"},
+			},
+		},
+	})
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:         210,
+			Debugger:      true,
+			Tid:           8,
+			Name:          "TopFn",
+			Filename:      "/ws/src/top.apl",
+			CurrentRow:    11,
+			CurrentColumn: 2,
+		},
+	})
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "ReplyGetSIStack",
+		Args: protocol.ReplyGetSIStackArgs{
+			Tid: 8,
+			Stack: []protocol.SIStackEntry{
+				{Description: "TopFn"},
+				{Description: "CallerFn"},
+			},
+		},
+	})
+
+	scopesResp, _ := server.HandleRequest(Request{
+		Seq:     64,
+		Command: "scopes",
+		Arguments: map[string]any{
+			"frameId": 210,
+		},
+	})
+	if !scopesResp.Success {
+		t.Fatalf("expected scopes success, got %s", scopesResp.Message)
+	}
+	scopesBody, ok := scopesResp.Body.(ScopesResponseBody)
+	if !ok {
+		t.Fatalf("expected ScopesResponseBody, got %T", scopesResp.Body)
+	}
+	if len(scopesBody.Scopes) != 1 {
+		t.Fatalf("expected one scope, got %d", len(scopesBody.Scopes))
+	}
+	if scopesBody.Scopes[0].Name != "Locals" {
+		t.Fatalf("unexpected scope name: %#v", scopesBody.Scopes[0])
+	}
+	if scopesBody.Scopes[0].VariablesReference <= 0 {
+		t.Fatalf("expected scope variablesReference > 0, got %d", scopesBody.Scopes[0].VariablesReference)
+	}
+	firstScopeRef := scopesBody.Scopes[0].VariablesReference
+
+	scopesResp2, _ := server.HandleRequest(Request{
+		Seq:     65,
+		Command: "scopes",
+		Arguments: map[string]any{
+			"frameId": 210,
+		},
+	})
+	if !scopesResp2.Success {
+		t.Fatalf("expected second scopes success, got %s", scopesResp2.Message)
+	}
+	scopesBody2 := scopesResp2.Body.(ScopesResponseBody)
+	if scopesBody2.Scopes[0].VariablesReference != firstScopeRef {
+		t.Fatalf("expected stable variablesReference %d, got %d", firstScopeRef, scopesBody2.Scopes[0].VariablesReference)
+	}
+
+	varsResp, _ := server.HandleRequest(Request{
+		Seq:     66,
+		Command: "variables",
+		Arguments: map[string]any{
+			"variablesReference": firstScopeRef,
+		},
+	})
+	if !varsResp.Success {
+		t.Fatalf("expected variables success, got %s", varsResp.Message)
+	}
+	varsBody, ok := varsResp.Body.(VariablesResponseBody)
+	if !ok {
+		t.Fatalf("expected VariablesResponseBody, got %T", varsResp.Body)
+	}
+
+	var (
+		foundLine       bool
+		sourceRef       int
+		siStackRef      int
+		foundThreadName bool
+	)
+	for _, variable := range varsBody.Variables {
+		switch variable.Name {
+		case "line":
+			foundLine = variable.Value == "12" && variable.VariablesReference == 0
+		case "source":
+			sourceRef = variable.VariablesReference
+		case "siStack":
+			siStackRef = variable.VariablesReference
+		case "threadName":
+			foundThreadName = variable.Value == "Main"
+		}
+	}
+	if !foundLine {
+		t.Fatalf("expected scalar line variable in locals scope, got %#v", varsBody.Variables)
+	}
+	if sourceRef <= 0 {
+		t.Fatalf("expected object source variable reference, got %d", sourceRef)
+	}
+	if siStackRef <= 0 {
+		t.Fatalf("expected array siStack variable reference, got %d", siStackRef)
+	}
+	if !foundThreadName {
+		t.Fatalf("expected threadName scalar variable, got %#v", varsBody.Variables)
+	}
+
+	sourceVarsResp, _ := server.HandleRequest(Request{
+		Seq:     67,
+		Command: "variables",
+		Arguments: map[string]any{
+			"variablesReference": sourceRef,
+		},
+	})
+	if !sourceVarsResp.Success {
+		t.Fatalf("expected source variables success, got %s", sourceVarsResp.Message)
+	}
+	sourceVarsBody := sourceVarsResp.Body.(VariablesResponseBody)
+	if len(sourceVarsBody.Variables) == 0 {
+		t.Fatal("expected source object children")
+	}
+	var foundPath bool
+	for _, variable := range sourceVarsBody.Variables {
+		if variable.Name == "path" && variable.Value == "/ws/src/top.apl" {
+			foundPath = true
+		}
+		if variable.VariablesReference != 0 {
+			t.Fatalf("expected scalar source child, got %#v", variable)
+		}
+	}
+	if !foundPath {
+		t.Fatalf("expected source.path variable, got %#v", sourceVarsBody.Variables)
+	}
+
+	siVarsResp, _ := server.HandleRequest(Request{
+		Seq:     68,
+		Command: "variables",
+		Arguments: map[string]any{
+			"variablesReference": siStackRef,
+		},
+	})
+	if !siVarsResp.Success {
+		t.Fatalf("expected siStack variables success, got %s", siVarsResp.Message)
+	}
+	siVarsBody := siVarsResp.Body.(VariablesResponseBody)
+	if len(siVarsBody.Variables) != 2 {
+		t.Fatalf("expected two siStack entries, got %#v", siVarsBody.Variables)
+	}
+	if siVarsBody.Variables[0].Name != "[0]" || siVarsBody.Variables[0].Value != "TopFn" {
+		t.Fatalf("unexpected first siStack entry: %#v", siVarsBody.Variables[0])
+	}
+	if siVarsBody.Variables[1].Name != "[1]" || siVarsBody.Variables[1].Value != "CallerFn" {
+		t.Fatalf("unexpected second siStack entry: %#v", siVarsBody.Variables[1])
+	}
+}
+
+func TestHandleRequest_VariablesUnknownReferenceFails(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	resp, _ := server.HandleRequest(Request{
+		Seq:     69,
+		Command: "variables",
+		Arguments: map[string]any{
+			"variablesReference": 9999,
+		},
+	})
+	if resp.Success {
+		t.Fatal("expected unknown variablesReference to fail")
+	}
+}
+
+func TestHandleRequest_VariablesEmptyArrayReturnsEmptySlice(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:         211,
+			Debugger:      true,
+			Tid:           1,
+			Name:          "TopFn",
+			CurrentRow:    3,
+			CurrentColumn: 0,
+		},
+	})
+
+	scopesResp, _ := server.HandleRequest(Request{
+		Seq:     69,
+		Command: "scopes",
+		Arguments: map[string]any{
+			"frameId": 211,
+		},
+	})
+	if !scopesResp.Success {
+		t.Fatalf("expected scopes success, got %s", scopesResp.Message)
+	}
+	scopesBody := scopesResp.Body.(ScopesResponseBody)
+	scopeRef := scopesBody.Scopes[0].VariablesReference
+
+	varsResp, _ := server.HandleRequest(Request{
+		Seq:     70,
+		Command: "variables",
+		Arguments: map[string]any{
+			"variablesReference": scopeRef,
+		},
+	})
+	if !varsResp.Success {
+		t.Fatalf("expected variables success, got %s", varsResp.Message)
+	}
+	varsBody := varsResp.Body.(VariablesResponseBody)
+
+	siRef := 0
+	for _, variable := range varsBody.Variables {
+		if variable.Name == "siStack" {
+			siRef = variable.VariablesReference
+			break
+		}
+	}
+	if siRef <= 0 {
+		t.Fatalf("expected siStack child reference, got %#v", varsBody.Variables)
+	}
+
+	siResp, _ := server.HandleRequest(Request{
+		Seq:     71,
+		Command: "variables",
+		Arguments: map[string]any{
+			"variablesReference": siRef,
+		},
+	})
+	if !siResp.Success {
+		t.Fatalf("expected empty siStack variables request to succeed, got %s", siResp.Message)
+	}
+	siBody := siResp.Body.(VariablesResponseBody)
+	if siBody.Variables == nil {
+		t.Fatal("expected empty variables slice, got nil")
+	}
+	if len(siBody.Variables) != 0 {
+		t.Fatalf("expected zero siStack children, got %#v", siBody.Variables)
+	}
+}
+
 func TestHandleRidePayload_OpenWindowRegistersSourceReferenceAndToken(t *testing.T) {
 	server := NewServer()
 	enterRunningState(t, server)

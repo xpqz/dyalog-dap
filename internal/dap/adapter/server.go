@@ -55,6 +55,31 @@ type StackTraceResponseBody struct {
 	TotalFrames int          `json:"totalFrames"`
 }
 
+// Scope represents one DAP variable scope.
+type Scope struct {
+	Name               string `json:"name"`
+	VariablesReference int    `json:"variablesReference"`
+	Expensive          bool   `json:"expensive"`
+}
+
+// ScopesResponseBody is returned by DAP scopes requests.
+type ScopesResponseBody struct {
+	Scopes []Scope `json:"scopes"`
+}
+
+// Variable represents one DAP variable entry.
+type Variable struct {
+	Name               string `json:"name"`
+	Value              string `json:"value"`
+	Type               string `json:"type,omitempty"`
+	VariablesReference int    `json:"variablesReference"`
+}
+
+// VariablesResponseBody is returned by DAP variables requests.
+type VariablesResponseBody struct {
+	Variables []Variable `json:"variables"`
+}
+
 // Breakpoint describes one DAP breakpoint result.
 type Breakpoint struct {
 	Verified bool `json:"verified"`
@@ -116,6 +141,9 @@ type Server struct {
 	pendingByPath      map[string][]int
 	pendingBySourceRef map[int][]int
 	nextSourceRef      int
+	frameScopeRef      map[int]int
+	variablesByRef     map[int][]Variable
+	nextVariablesRef   int
 	syntheticThreadIDs map[string]int
 	nextSyntheticID    int
 	pauseFallback      func() error
@@ -187,6 +215,9 @@ func NewServer() *Server {
 		pendingByPath:      map[string][]int{},
 		pendingBySourceRef: map[int][]int{},
 		nextSourceRef:      1,
+		frameScopeRef:      map[int]int{},
+		variablesByRef:     map[int][]Variable{},
+		nextVariablesRef:   1,
 		syntheticThreadIDs: map[string]int{},
 		nextSyntheticID:    1000000,
 	}
@@ -305,6 +336,10 @@ func (s *Server) HandleRequest(req Request) (Response, []Event) {
 		return s.handleThreadsRequest(req), nil
 	case "stackTrace":
 		return s.handleStackTraceRequest(req), nil
+	case "scopes":
+		return s.handleScopesRequest(req), nil
+	case "variables":
+		return s.handleVariablesRequest(req), nil
 	case "setBreakpoints":
 		return s.handleSetBreakpointsRequest(req), nil
 
@@ -448,6 +483,50 @@ func (s *Server) handleSetBreakpointsRequest(req Request) Response {
 			Breakpoints: buildBreakpointResponses(args.lines, true),
 		},
 	}
+}
+
+func (s *Server) handleScopesRequest(req Request) Response {
+	if s.state != stateAttachedOrLaunched {
+		return s.failure(req, "scopes requires launch or attach")
+	}
+
+	frameID := extractFrameIDArgument(req.Arguments)
+	if frameID <= 0 {
+		return s.failure(req, "scopes requires frameId")
+	}
+
+	scopeRef, ok := s.ensureScopeForFrame(frameID)
+	if !ok {
+		return s.failure(req, "scopes requires valid frameId")
+	}
+
+	return s.successWithBody(req, ScopesResponseBody{
+		Scopes: []Scope{{
+			Name:               "Locals",
+			VariablesReference: scopeRef,
+			Expensive:          false,
+		}},
+	})
+}
+
+func (s *Server) handleVariablesRequest(req Request) Response {
+	if s.state != stateAttachedOrLaunched {
+		return s.failure(req, "variables requires launch or attach")
+	}
+
+	varRef := extractVariablesReferenceArgument(req.Arguments)
+	if varRef <= 0 {
+		return s.failure(req, "variables requires variablesReference")
+	}
+
+	variables, ok := s.variablesByRef[varRef]
+	if !ok {
+		return s.failure(req, "unknown variablesReference")
+	}
+
+	return s.successWithBody(req, VariablesResponseBody{
+		Variables: cloneVariables(variables),
+	})
 }
 
 // HandleRidePayload updates adapter runtime stop state from inbound RIDE events.
@@ -696,6 +775,10 @@ func (s *Server) unbindToken(token int) {
 	}
 
 	if _, ok := s.tracerWindows[token]; ok {
+		if scopeRef, exists := s.frameScopeRef[token]; exists {
+			s.dropVariableReference(scopeRef)
+			delete(s.frameScopeRef, token)
+		}
 		delete(s.tracerWindows, token)
 		s.removeTracerToken(token)
 		if s.activeTracerSet && s.activeTracerWindow == token {
@@ -798,6 +881,9 @@ func (s *Server) resetRuntimeStateForReconnect() {
 	s.siDescriptions = map[int][]string{}
 	s.sourceByToken = map[int]sourceBinding{}
 	s.tokenBySourceRef = map[int]int{}
+	s.frameScopeRef = map[int]int{}
+	s.variablesByRef = map[int][]Variable{}
+	s.nextVariablesRef = 1
 }
 
 func newOutputEvent(category, output string) Event {
@@ -1083,6 +1169,28 @@ func extractThreadIDArgument(args any) int {
 	return intFromAny(m["threadId"])
 }
 
+func extractFrameIDArgument(args any) int {
+	if args == nil {
+		return 0
+	}
+	m, ok := args.(map[string]any)
+	if !ok {
+		return 0
+	}
+	return intFromAny(m["frameId"])
+}
+
+func extractVariablesReferenceArgument(args any) int {
+	if args == nil {
+		return 0
+	}
+	m, ok := args.(map[string]any)
+	if !ok {
+		return 0
+	}
+	return intFromAny(m["variablesReference"])
+}
+
 func extractSetBreakpointsArguments(args any) (setBreakpointsArguments, bool) {
 	typedArgs, ok := args.(map[string]any)
 	if !ok {
@@ -1238,6 +1346,116 @@ func zeroBasedLines(lines []int) []int {
 		converted = append(converted, line-1)
 	}
 	return converted
+}
+
+func (s *Server) ensureScopeForFrame(frameID int) (int, bool) {
+	if _, ok := s.tracerWindows[frameID]; !ok {
+		return 0, false
+	}
+	if ref, ok := s.frameScopeRef[frameID]; ok {
+		if _, exists := s.variablesByRef[ref]; exists {
+			return ref, true
+		}
+	}
+
+	frameVars := s.buildFrameVariables(frameID)
+	scopeRef := s.allocateVariablesReference(frameVars)
+	s.frameScopeRef[frameID] = scopeRef
+	return scopeRef, true
+}
+
+func (s *Server) buildFrameVariables(frameID int) []Variable {
+	frame := s.tracerWindows[frameID]
+	threadID := frame.threadID
+	threadName := ""
+	if thread, ok := s.threadCache[threadID]; ok {
+		threadName = thread.Name
+	}
+	if threadName == "" {
+		threadName = fmt.Sprintf("Thread %d", threadID)
+	}
+
+	sourceBinding, hasSource := s.sourceByToken[frameID]
+	sourcePath := ""
+	sourceRef := 0
+	if hasSource {
+		sourcePath = sourceBinding.path
+		sourceRef = sourceBinding.sourceRef
+	}
+	sourceChildren := []Variable{
+		{Name: "path", Value: sourcePath, Type: "string", VariablesReference: 0},
+		{Name: "sourceReference", Value: fmt.Sprintf("%d", sourceRef), Type: "number", VariablesReference: 0},
+		{Name: "token", Value: fmt.Sprintf("%d", frameID), Type: "number", VariablesReference: 0},
+	}
+	if hasSource && sourceBinding.displayName != "" {
+		sourceChildren = append(sourceChildren, Variable{
+			Name:               "displayName",
+			Value:              sourceBinding.displayName,
+			Type:               "string",
+			VariablesReference: 0,
+		})
+	}
+	sourceChildrenRef := s.allocateVariablesReference(sourceChildren)
+
+	threadChildrenRef := s.allocateVariablesReference([]Variable{
+		{Name: "id", Value: fmt.Sprintf("%d", threadID), Type: "number", VariablesReference: 0},
+		{Name: "name", Value: threadName, Type: "string", VariablesReference: 0},
+	})
+
+	siDescriptions := append([]string{}, s.siDescriptions[threadID]...)
+	siChildren := make([]Variable, 0, len(siDescriptions))
+	for i, description := range siDescriptions {
+		siChildren = append(siChildren, Variable{
+			Name:               fmt.Sprintf("[%d]", i),
+			Value:              description,
+			Type:               "string",
+			VariablesReference: 0,
+		})
+	}
+	siChildrenRef := s.allocateVariablesReference(siChildren)
+
+	return []Variable{
+		{Name: "frameName", Value: frame.name, Type: "string", VariablesReference: 0},
+		{Name: "line", Value: fmt.Sprintf("%d", oneBased(frame.line)), Type: "number", VariablesReference: 0},
+		{Name: "column", Value: fmt.Sprintf("%d", oneBased(frame.column)), Type: "number", VariablesReference: 0},
+		{Name: "threadId", Value: fmt.Sprintf("%d", threadID), Type: "number", VariablesReference: 0},
+		{Name: "threadName", Value: threadName, Type: "string", VariablesReference: 0},
+		{Name: "thread", Value: "Object", Type: "object", VariablesReference: threadChildrenRef},
+		{Name: "source", Value: "Object", Type: "object", VariablesReference: sourceChildrenRef},
+		{Name: "siStack", Value: fmt.Sprintf("[%d]", len(siDescriptions)), Type: "array", VariablesReference: siChildrenRef},
+	}
+}
+
+func (s *Server) allocateVariablesReference(variables []Variable) int {
+	ref := s.nextVariablesRef
+	s.nextVariablesRef++
+	s.variablesByRef[ref] = cloneVariables(variables)
+	return ref
+}
+
+func cloneVariables(variables []Variable) []Variable {
+	if len(variables) == 0 {
+		return []Variable{}
+	}
+	cloned := make([]Variable, len(variables))
+	copy(cloned, variables)
+	return cloned
+}
+
+func (s *Server) dropVariableReference(ref int) {
+	if ref <= 0 {
+		return
+	}
+	variables, ok := s.variablesByRef[ref]
+	if !ok {
+		return
+	}
+	delete(s.variablesByRef, ref)
+	for _, variable := range variables {
+		if variable.VariablesReference > 0 {
+			s.dropVariableReference(variable.VariablesReference)
+		}
+	}
 }
 
 func oneBased(value int) int {
