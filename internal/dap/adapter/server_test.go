@@ -380,3 +380,103 @@ func TestHandleRidePayload_OpenWindowNonDebuggerDoesNotEmitStopped(t *testing.T)
 		t.Fatalf("expected no events, got %#v", events)
 	}
 }
+
+func TestHandleRequest_ThreadsPollsGetThreadsAndReturnsCachedThreads(t *testing.T) {
+	ride := &mockRideController{}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "ReplyGetThreads",
+		Args: protocol.ReplyGetThreadsArgs{
+			Threads: []protocol.ThreadInfo{
+				{Tid: 1, Description: "Main"},
+				{Tid: 2, Description: "Worker"},
+			},
+		},
+	})
+
+	resp, _ := server.HandleRequest(Request{Seq: 50, Command: "threads"})
+	if !resp.Success {
+		t.Fatalf("expected threads success, got %s", resp.Message)
+	}
+
+	call := ride.lastCall()
+	if call.command != "GetThreads" {
+		t.Fatalf("expected GetThreads poll, got %q", call.command)
+	}
+
+	body, ok := resp.Body.(ThreadsResponseBody)
+	if !ok {
+		t.Fatalf("expected ThreadsResponseBody, got %T", resp.Body)
+	}
+	if len(body.Threads) != 2 {
+		t.Fatalf("expected 2 threads, got %d", len(body.Threads))
+	}
+	if body.Threads[0].ID != 1 || body.Threads[0].Name != "Main" {
+		t.Fatalf("unexpected first thread: %#v", body.Threads[0])
+	}
+	if body.Threads[1].ID != 2 || body.Threads[1].Name != "Worker" {
+		t.Fatalf("unexpected second thread: %#v", body.Threads[1])
+	}
+}
+
+func TestHandleRidePayload_ReplyGetThreadsMaintainsStableIDsAcrossUpdates(t *testing.T) {
+	ride := &mockRideController{}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "ReplyGetThreads",
+		Args: protocol.ReplyGetThreadsArgs{
+			Threads: []protocol.ThreadInfo{
+				{Tid: 9, Description: "Thread A"},
+			},
+		},
+	})
+
+	resp, _ := server.HandleRequest(Request{Seq: 51, Command: "threads"})
+	if !resp.Success {
+		t.Fatalf("expected threads success, got %s", resp.Message)
+	}
+	first := resp.Body.(ThreadsResponseBody).Threads[0]
+	if first.ID != 9 {
+		t.Fatalf("expected first ID=9, got %d", first.ID)
+	}
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "ReplyGetThreads",
+		Args: protocol.ReplyGetThreadsArgs{
+			Threads: []protocol.ThreadInfo{
+				{Tid: 9, Description: "Thread A (running)"},
+			},
+		},
+	})
+
+	resp, _ = server.HandleRequest(Request{Seq: 52, Command: "threads"})
+	if !resp.Success {
+		t.Fatalf("expected threads success, got %s", resp.Message)
+	}
+	second := resp.Body.(ThreadsResponseBody).Threads[0]
+	if second.ID != 9 {
+		t.Fatalf("expected stable ID=9, got %d", second.ID)
+	}
+	if second.Name != "Thread A (running)" {
+		t.Fatalf("expected updated name, got %q", second.Name)
+	}
+}
+
+func TestHandleRequest_ThreadsWithoutRideControllerFails(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	resp, _ := server.HandleRequest(Request{Seq: 53, Command: "threads"})
+	if resp.Success {
+		t.Fatal("expected threads request without controller to fail")
+	}
+}

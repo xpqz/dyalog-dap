@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/stefan/lsp-dap/internal/ride/protocol"
@@ -26,6 +27,17 @@ type Response struct {
 type Event struct {
 	Event string
 	Body  any
+}
+
+// Thread represents one DAP thread.
+type Thread struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// ThreadsResponseBody is returned by DAP threads requests.
+type ThreadsResponseBody struct {
+	Threads []Thread `json:"threads"`
 }
 
 // Capabilities describes the adapter's currently supported DAP feature set.
@@ -62,6 +74,10 @@ type Server struct {
 	activeThreadID     int
 	activeThreadSet    bool
 	tracerWindows      map[int]tracerWindowState
+	threadCache        map[int]Thread
+	threadOrder        []int
+	syntheticThreadIDs map[string]int
+	nextSyntheticID    int
 	pauseFallback      func() error
 }
 
@@ -98,7 +114,11 @@ func NewServer() *Server {
 			SupportsExceptionInfoRequest:      false,
 			SupportsEvaluateForHovers:         false,
 		},
-		tracerWindows: map[int]tracerWindowState{},
+		tracerWindows:      map[int]tracerWindowState{},
+		threadCache:        map[int]Thread{},
+		threadOrder:        nil,
+		syntheticThreadIDs: map[string]int{},
+		nextSyntheticID:    1000000,
 	}
 }
 
@@ -167,6 +187,8 @@ func (s *Server) HandleRequest(req Request) (Response, []Event) {
 
 	case "continue", "next", "stepIn", "stepOut", "pause":
 		return s.handleControlCommand(req), nil
+	case "threads":
+		return s.handleThreadsRequest(req), nil
 
 	default:
 		return s.failure(req, "unsupported command"), nil
@@ -217,6 +239,26 @@ func (s *Server) sendWindowCommand(req Request, rideCommand string) Response {
 	return s.success(req)
 }
 
+func (s *Server) handleThreadsRequest(req Request) Response {
+	if s.state != stateAttachedOrLaunched {
+		return s.failure(req, "threads requires launch or attach")
+	}
+	if s.rideController == nil {
+		return s.failure(req, "no RIDE controller configured")
+	}
+	if err := s.rideController.SendCommand("GetThreads", map[string]any{}); err != nil {
+		return s.failure(req, "failed to request threads from RIDE")
+	}
+	return Response{
+		RequestSeq: req.Seq,
+		Command:    req.Command,
+		Success:    true,
+		Body: ThreadsResponseBody{
+			Threads: s.snapshotThreads(),
+		},
+	}
+}
+
 // HandleRidePayload updates adapter runtime stop state from inbound RIDE events.
 func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 	s.mu.Lock()
@@ -227,6 +269,14 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 	}
 
 	switch decoded.Command {
+	case "ReplyGetThreads":
+		reply, ok := extractReplyGetThreads(decoded.Args)
+		if !ok {
+			return nil
+		}
+		s.updateThreadCache(reply)
+		return nil
+
 	case "OpenWindow":
 		window, ok := extractWindowContent(decoded.Args)
 		if !ok || !window.Debugger {
@@ -291,6 +341,65 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 	default:
 		return nil
 	}
+}
+
+func (s *Server) updateThreadCache(reply protocol.ReplyGetThreadsArgs) {
+	nextCache := make(map[int]Thread, len(reply.Threads))
+	nextOrder := make([]int, 0, len(reply.Threads))
+
+	for _, threadInfo := range reply.Threads {
+		id := threadInfo.Tid
+		if id <= 0 {
+			key := threadInfo.Description
+			if key == "" {
+				key = threadInfo.State + "|" + threadInfo.Flags + "|" + threadInfo.Treq
+			}
+			if key == "" {
+				key = "unknown"
+			}
+
+			syntheticID, ok := s.syntheticThreadIDs[key]
+			if !ok {
+				syntheticID = s.nextSyntheticID
+				s.nextSyntheticID++
+				s.syntheticThreadIDs[key] = syntheticID
+			}
+			id = syntheticID
+		}
+
+		name := threadInfo.Description
+		if name == "" {
+			name = fmt.Sprintf("Thread %d", id)
+		}
+
+		nextCache[id] = Thread{
+			ID:   id,
+			Name: name,
+		}
+		nextOrder = append(nextOrder, id)
+	}
+
+	s.threadCache = nextCache
+	s.threadOrder = nextOrder
+}
+
+func (s *Server) snapshotThreads() []Thread {
+	threads := make([]Thread, 0, len(s.threadOrder))
+	seen := map[int]struct{}{}
+
+	for _, id := range s.threadOrder {
+		thread, ok := s.threadCache[id]
+		if !ok {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		threads = append(threads, thread)
+	}
+
+	return threads
 }
 
 func (s *Server) newStoppedEventBody(reason, description string) StoppedEventBody {
@@ -373,6 +482,37 @@ func extractHadError(args any) (protocol.HadErrorArgs, bool) {
 		}, true
 	default:
 		return protocol.HadErrorArgs{}, false
+	}
+}
+
+func extractReplyGetThreads(args any) (protocol.ReplyGetThreadsArgs, bool) {
+	switch v := args.(type) {
+	case protocol.ReplyGetThreadsArgs:
+		return v, true
+	case map[string]any:
+		rawThreads, ok := v["threads"].([]any)
+		if !ok {
+			return protocol.ReplyGetThreadsArgs{}, false
+		}
+
+		threads := make([]protocol.ThreadInfo, 0, len(rawThreads))
+		for _, raw := range rawThreads {
+			threadMap, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			threads = append(threads, protocol.ThreadInfo{
+				Description: stringFromAny(threadMap["description"]),
+				State:       stringFromAny(threadMap["state"]),
+				Tid:         intFromAny(threadMap["tid"]),
+				Flags:       stringFromAny(threadMap["flags"]),
+				Treq:        stringFromAny(threadMap["Treq"]),
+			})
+		}
+
+		return protocol.ReplyGetThreadsArgs{Threads: threads}, true
+	default:
+		return protocol.ReplyGetThreadsArgs{}, false
 	}
 }
 
