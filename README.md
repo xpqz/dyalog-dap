@@ -8,24 +8,36 @@ If you are an APL user and just want debugging to work in VS Code, start here.
 
 Current status (as of February 9, 2026):
 
-- This project has working protocol/runtime layers and live Dyalog smoke coverage.
-- The `dap-adapter` binary is not yet a full long-running stdio DAP server, so a full end-user VS Code debugging session is not available yet.
+- The `dap-adapter` binary is now a long-running stdio DAP server.
+- Core phase-1 debug commands are wired: initialize, launch/attach, threads, stackTrace, continue/step/pause, setBreakpoints.
+- Live Dyalog smoke coverage is in CI and local tests.
+- This repository does not yet ship a standalone VS Code extension package, so you need a DAP client/extension configuration that can launch an external adapter command.
 
-What you can do today:
+Quick start right now:
 
-1. Verify your Dyalog/RIDE environment is reachable.
-2. Run the live smoke test against a real interpreter.
-3. Capture protocol transcripts for troubleshooting.
-
-Quick live check:
+1. Start Dyalog with RIDE enabled:
 
 ```bash
-export DYALOG_RIDE_ADDR=127.0.0.1:4502
-export DYALOG_RIDE_LAUNCH='RIDE_INIT=SERVE:*:4502 dyalog +s -q'
-go test ./internal/integration/harness -run '^TestLiveDyalog_' -count=1 -v
+RIDE_INIT=SERVE:*:4502 dyalog +s -q
 ```
 
-When this prints `PASS`, the adapter stack is talking to a real Dyalog instance.
+2. Build and run the adapter:
+
+```bash
+go build ./cmd/dap-adapter
+DYALOG_RIDE_ADDR=127.0.0.1:4502 ./dap-adapter
+```
+
+3. Point your DAP client to that adapter process and send `initialize` then `launch` (or `attach`).
+
+Supported launch/attach arguments:
+
+- `rideAddr` (example `127.0.0.1:4502`)
+- `rideLaunchCommand` (optional, adapter launches Dyalog)
+- `rideConnectTimeout` (optional, duration string, example `10s`)
+- `rideConnectTimeoutMs` (optional integer milliseconds)
+- `rideTranscriptsDir` (optional transcript output directory)
+- `dyalogBin` (optional executable path; adapter derives `RIDE_INIT=SERVE:*:<port> ... +s -q`)
 
 ## Getting Started in 5 Minutes
 
@@ -84,6 +96,9 @@ go test ./internal/ride/transport ./internal/ride/protocol ./internal/ride/sessi
 
 # integration harness only
 go test ./internal/integration/harness -count=1
+
+# run adapter against an already-running Dyalog RIDE endpoint
+DYALOG_RIDE_ADDR=127.0.0.1:4502 go run ./cmd/dap-adapter
 ```
 
 ## Prerequisites
@@ -99,10 +114,11 @@ go test ./internal/integration/harness -count=1
 - Typed RIDE protocol codec for phase-1 command surface
 - Prompt-aware session dispatcher with queue/allow-list semantics
 - DAP adapter core lifecycle, run control, thread/stack, breakpoint mapping
+- Long-running stdio DAP server entrypoint (`cmd/dap-adapter`)
 - Integration harness with protocol transcript artifacts
 - CI gating + VS Code smoke workflow scaffolding
 
-Current limitation: `/cmd/dap-adapter` is a scaffold entrypoint that constructs the adapter and exits. Core protocol/runtime logic is implemented and tested, but the long-running stdio DAP server loop wrapper is still pending.
+Current limitation: the repository still lacks a packaged VS Code extension/debugger type contribution; adapter usage currently depends on an external DAP client configuration.
 
 ## Day-to-Day Development
 
@@ -140,11 +156,13 @@ Tasks:
 - `build dap-adapter`
 - `test smoke`
 
-Minimal flow:
+Smoke flow in this repo:
 
 1. Open folder in VS Code.
 2. Run task `build dap-adapter`.
 3. Start launch config `Harness Integration Smoke`.
+
+For real interactive debugging UI, use a VS Code DAP client/extension setup that launches `dap-adapter` and sends `launch`/`attach` with `rideAddr`.
 
 ## Live Dyalog Integration Harness
 
@@ -201,6 +219,10 @@ go test ./... -count=1
 - Increase timeout: `export DYALOG_RIDE_CONNECT_TIMEOUT=30s`.
 - If startup is external, ensure interpreter launched with `RIDE_INIT=SERVE:*:<port>` and that `<port>` matches `DYALOG_RIDE_ADDR`.
 - If auto-launching, verify the executable path via `DYALOG_BIN` or explicit `DYALOG_RIDE_LAUNCH`.
+
+### DAP `launch` or `attach` fails with missing ride address
+
+- Provide `rideAddr` in launch/attach arguments, or set `DYALOG_RIDE_ADDR` before starting `dap-adapter`.
 
 ### Live smoke test is skipped
 
@@ -273,7 +295,7 @@ Workflow file: `.github/workflows/ci.yml`
 
 ## Known Limitations
 
-- `/cmd/dap-adapter` is currently not yet a full stdio DAP server loop
+- No packaged VS Code extension is included in this repository yet.
 - Some integration scenarios are fake-server deterministic flows
 - Live interpreter matrix coverage depends on environment availability
 - Prompt-mode semantics vary across interpreter/version combinations and are tracked as explicit open items
