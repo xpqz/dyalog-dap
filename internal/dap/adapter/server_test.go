@@ -364,6 +364,135 @@ func TestHandleRidePayload_HadErrorEmitsExceptionStopped(t *testing.T) {
 	}
 }
 
+func TestHandleRidePayload_DisconnectEmitsTerminatedAndEndsSession(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	events := server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "Disconnect",
+		Args: protocol.DisconnectArgs{
+			Message: "peer disconnected",
+		},
+	})
+	if len(events) != 2 {
+		t.Fatalf("expected output and terminated events, got %#v", events)
+	}
+	if events[0].Event != "output" {
+		t.Fatalf("expected first event output, got %q", events[0].Event)
+	}
+	output := events[0].Body.(OutputEventBody)
+	if output.Category != "stderr" {
+		t.Fatalf("expected stderr category, got %q", output.Category)
+	}
+	if output.Output == "" {
+		t.Fatal("expected disconnect output message")
+	}
+	if events[1].Event != "terminated" {
+		t.Fatalf("expected terminated event, got %q", events[1].Event)
+	}
+
+	resp, _ := server.HandleRequest(Request{Seq: 42, Command: "configurationDone"})
+	if resp.Success {
+		t.Fatal("expected session to be terminated after Disconnect")
+	}
+}
+
+func TestHandleRidePayload_SysErrorEmitsTerminatedAndEndsSession(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	events := server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "SysError",
+		Args: protocol.SysErrorArgs{
+			Text:  "SYSTEM ERROR",
+			Stack: "stacktrace",
+		},
+	})
+	if len(events) != 2 {
+		t.Fatalf("expected output and terminated events, got %#v", events)
+	}
+	if events[0].Event != "output" || events[1].Event != "terminated" {
+		t.Fatalf("unexpected event sequence: %#v", events)
+	}
+	output := events[0].Body.(OutputEventBody)
+	if output.Category != "stderr" {
+		t.Fatalf("expected stderr category, got %q", output.Category)
+	}
+	if output.Output == "" {
+		t.Fatal("expected SysError output text")
+	}
+
+	resp, _ := server.HandleRequest(Request{Seq: 43, Command: "configurationDone"})
+	if resp.Success {
+		t.Fatal("expected session to be terminated after SysError")
+	}
+}
+
+func TestHandleRidePayload_InternalErrorEmitsTerminatedAndEndsSession(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	events := server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "InternalError",
+		Args: protocol.InternalErrorArgs{
+			ErrorText: "internal fault",
+			Message:   "panic in interpreter",
+		},
+	})
+	if len(events) != 2 {
+		t.Fatalf("expected output and terminated events, got %#v", events)
+	}
+	if events[0].Event != "output" || events[1].Event != "terminated" {
+		t.Fatalf("unexpected event sequence: %#v", events)
+	}
+	output := events[0].Body.(OutputEventBody)
+	if output.Category != "stderr" {
+		t.Fatalf("expected stderr category, got %q", output.Category)
+	}
+	if output.Output == "" {
+		t.Fatal("expected InternalError output text")
+	}
+
+	resp, _ := server.HandleRequest(Request{Seq: 44, Command: "configurationDone"})
+	if resp.Success {
+		t.Fatal("expected session to be terminated after InternalError")
+	}
+}
+
+func TestHandleRidePayload_UnknownCommandEmitsOutputWithoutTermination(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	events := server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "UnknownCommand",
+		Args: protocol.UnknownCommandArgs{
+			Name: "BogusCommand",
+		},
+	})
+	if len(events) != 1 {
+		t.Fatalf("expected single output event, got %#v", events)
+	}
+	if events[0].Event != "output" {
+		t.Fatalf("expected output event, got %q", events[0].Event)
+	}
+	output := events[0].Body.(OutputEventBody)
+	if output.Category != "console" {
+		t.Fatalf("expected console category, got %q", output.Category)
+	}
+	if output.Output == "" {
+		t.Fatal("expected unknown command output text")
+	}
+
+	resp, _ := server.HandleRequest(Request{Seq: 45, Command: "configurationDone"})
+	if !resp.Success {
+		t.Fatalf("expected session to remain active after UnknownCommand, got %s", resp.Message)
+	}
+}
+
 func TestHandleRidePayload_OpenWindowNonDebuggerDoesNotEmitStopped(t *testing.T) {
 	server := NewServer()
 	enterRunningState(t, server)

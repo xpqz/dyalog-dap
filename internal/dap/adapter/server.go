@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/stefan/lsp-dap/internal/ride/protocol"
@@ -145,6 +146,12 @@ type StoppedEventBody struct {
 	ThreadID          int    `json:"threadId"`
 	AllThreadsStopped bool   `json:"allThreadsStopped"`
 	Description       string `json:"description,omitempty"`
+}
+
+// OutputEventBody is emitted for DAP output events synthesized from RIDE diagnostics.
+type OutputEventBody struct {
+	Category string `json:"category,omitempty"`
+	Output   string `json:"output"`
 }
 
 // NewServer creates a DAP server instance.
@@ -523,6 +530,32 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 			Event: "stopped",
 			Body:  s.newStoppedEventBody("exception", hadError.ErrorText),
 		}}
+	case "Disconnect":
+		disconnect, _ := extractDisconnect(decoded.Args)
+		s.terminateSessionFromRide()
+		return []Event{
+			newOutputEvent("stderr", formatDisconnectMessage(disconnect)),
+			{Event: "terminated", Body: map[string]any{}},
+		}
+	case "SysError":
+		sysError, _ := extractSysError(decoded.Args)
+		s.terminateSessionFromRide()
+		return []Event{
+			newOutputEvent("stderr", formatSysErrorMessage(sysError)),
+			{Event: "terminated", Body: map[string]any{}},
+		}
+	case "InternalError":
+		internalError, _ := extractInternalError(decoded.Args)
+		s.terminateSessionFromRide()
+		return []Event{
+			newOutputEvent("stderr", formatInternalErrorMessage(internalError)),
+			{Event: "terminated", Body: map[string]any{}},
+		}
+	case "UnknownCommand":
+		unknown, _ := extractUnknownCommand(decoded.Args)
+		return []Event{
+			newOutputEvent("console", formatUnknownCommandMessage(unknown)),
+		}
 
 	default:
 		return nil
@@ -716,6 +749,76 @@ func (s *Server) newStoppedEventBody(reason, description string) StoppedEventBod
 	}
 }
 
+func (s *Server) terminateSessionFromRide() {
+	s.state = stateTerminated
+	s.activeTracerSet = false
+	s.activeThreadSet = false
+}
+
+func newOutputEvent(category, output string) Event {
+	return Event{
+		Event: "output",
+		Body: OutputEventBody{
+			Category: category,
+			Output:   ensureTrailingNewline(output),
+		},
+	}
+}
+
+func ensureTrailingNewline(value string) string {
+	if value == "" {
+		return "\n"
+	}
+	if strings.HasSuffix(value, "\n") {
+		return value
+	}
+	return value + "\n"
+}
+
+func formatDisconnectMessage(args protocol.DisconnectArgs) string {
+	if args.Message == "" {
+		return "RIDE disconnected"
+	}
+	return fmt.Sprintf("RIDE disconnected: %s", args.Message)
+}
+
+func formatSysErrorMessage(args protocol.SysErrorArgs) string {
+	switch {
+	case args.Text == "" && args.Stack == "":
+		return "RIDE SysError"
+	case args.Text == "":
+		return fmt.Sprintf("RIDE SysError stack: %s", args.Stack)
+	case args.Stack == "":
+		return fmt.Sprintf("RIDE SysError: %s", args.Text)
+	default:
+		return fmt.Sprintf("RIDE SysError: %s\n%s", args.Text, args.Stack)
+	}
+}
+
+func formatInternalErrorMessage(args protocol.InternalErrorArgs) string {
+	parts := make([]string, 0, 3)
+	if args.Message != "" {
+		parts = append(parts, args.Message)
+	}
+	if args.ErrorText != "" {
+		parts = append(parts, args.ErrorText)
+	}
+	if args.Error != 0 {
+		parts = append(parts, fmt.Sprintf("code=%d", args.Error))
+	}
+	if len(parts) == 0 {
+		return "RIDE InternalError"
+	}
+	return "RIDE InternalError: " + strings.Join(parts, " | ")
+}
+
+func formatUnknownCommandMessage(args protocol.UnknownCommandArgs) string {
+	if args.Name == "" {
+		return "RIDE reported unknown command"
+	}
+	return fmt.Sprintf("RIDE reported unknown command: %s", args.Name)
+}
+
 func (s *Server) currentThreadID() int {
 	if s.activeThreadSet {
 		return s.activeThreadID
@@ -804,6 +907,62 @@ func extractHadError(args any) (protocol.HadErrorArgs, bool) {
 		}, true
 	default:
 		return protocol.HadErrorArgs{}, false
+	}
+}
+
+func extractDisconnect(args any) (protocol.DisconnectArgs, bool) {
+	switch v := args.(type) {
+	case protocol.DisconnectArgs:
+		return v, true
+	case map[string]any:
+		return protocol.DisconnectArgs{
+			Message: stringFromAny(v["message"]),
+		}, true
+	default:
+		return protocol.DisconnectArgs{}, false
+	}
+}
+
+func extractSysError(args any) (protocol.SysErrorArgs, bool) {
+	switch v := args.(type) {
+	case protocol.SysErrorArgs:
+		return v, true
+	case map[string]any:
+		return protocol.SysErrorArgs{
+			Text:  stringFromAny(v["text"]),
+			Stack: stringFromAny(v["stack"]),
+		}, true
+	default:
+		return protocol.SysErrorArgs{}, false
+	}
+}
+
+func extractUnknownCommand(args any) (protocol.UnknownCommandArgs, bool) {
+	switch v := args.(type) {
+	case protocol.UnknownCommandArgs:
+		return v, true
+	case map[string]any:
+		return protocol.UnknownCommandArgs{
+			Name: stringFromAny(v["name"]),
+		}, true
+	default:
+		return protocol.UnknownCommandArgs{}, false
+	}
+}
+
+func extractInternalError(args any) (protocol.InternalErrorArgs, bool) {
+	switch v := args.(type) {
+	case protocol.InternalErrorArgs:
+		return v, true
+	case map[string]any:
+		return protocol.InternalErrorArgs{
+			Error:     intFromAny(v["error"]),
+			ErrorText: stringFromAny(v["error_text"]),
+			DMX:       v["dmx"],
+			Message:   stringFromAny(v["message"]),
+		}, true
+	default:
+		return protocol.InternalErrorArgs{}, false
 	}
 }
 
