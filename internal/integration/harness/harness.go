@@ -17,6 +17,7 @@ import (
 const (
 	defaultTranscriptDir  = "artifacts/integration"
 	defaultConnectTimeout = 10 * time.Second
+	launchStopTimeout     = 1500 * time.Millisecond
 )
 
 var (
@@ -158,6 +159,7 @@ func (h *Harness) startLaunchCommand(ctx context.Context) error {
 	}
 
 	cmd := exec.CommandContext(ctx, "sh", "-lc", h.cfg.LaunchCommand)
+	setLaunchProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start launch command: %w", err)
 	}
@@ -172,13 +174,33 @@ func (h *Harness) stopLaunchCommand() error {
 	cmd := h.launchCmd
 	h.launchCmd = nil
 
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
 	if cmd.Process != nil && cmd.ProcessState == nil {
-		_ = cmd.Process.Kill()
+		_ = terminateProcessTree(cmd)
+		select {
+		case err := <-waitCh:
+			if err != nil {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) {
+					// Expected when process group termination is initiated by harness cleanup.
+					return nil
+				}
+				return err
+			}
+			return nil
+		case <-time.After(launchStopTimeout):
+			_ = killProcessTree(cmd)
+		}
 	}
-	if err := cmd.Wait(); err != nil {
+
+	if err := <-waitCh; err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			// Expected when we intentionally killed the launched process during cleanup.
+			// Expected when process group termination is initiated by harness cleanup.
 			return nil
 		}
 		return err
