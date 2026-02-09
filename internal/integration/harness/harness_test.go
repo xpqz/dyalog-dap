@@ -26,6 +26,23 @@ func TestHarness_StartRequiresRideAddr(t *testing.T) {
 	}
 }
 
+func TestHarness_CloseIgnoresKilledLaunchCommand(t *testing.T) {
+	h := New(Config{
+		LaunchCommand: "sleep 60",
+		TranscriptDir: t.TempDir(),
+	})
+	if err := h.startLaunchCommand(context.Background()); err != nil {
+		t.Fatalf("startLaunchCommand failed: %v", err)
+	}
+	if h.launchCmd == nil {
+		t.Fatal("expected launchCmd to be set")
+	}
+
+	if err := h.Close(); err != nil {
+		t.Fatalf("expected Close to ignore intentionally killed launch process, got %v", err)
+	}
+}
+
 func TestHarness_StartInitializesSessionAndCapturesTranscript(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

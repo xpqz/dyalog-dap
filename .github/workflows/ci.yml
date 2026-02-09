@@ -46,10 +46,12 @@ jobs:
       DYALOG_RIDE_ADDR: ${{ vars.DYALOG_RIDE_ADDR }}
       DYALOG_RIDE_LAUNCH: ${{ vars.DYALOG_RIDE_LAUNCH }}
       DYALOG_RIDE_CONNECT_TIMEOUT: ${{ vars.DYALOG_RIDE_CONNECT_TIMEOUT }}
+      DYALOG_BIN: ${{ vars.DYALOG_BIN }}
+      DYALOG_LIVE_REQUIRE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23.x"
       - name: Run live harness smoke (when endpoint is configured)
-        run: go test ./internal/integration/harness -count=1
+        run: go test ./internal/integration/harness -run '^TestLiveDyalog_' -count=1 -v

@@ -176,6 +176,11 @@ func (h *Harness) stopLaunchCommand() error {
 		_ = cmd.Process.Kill()
 	}
 	if err := cmd.Wait(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			// Expected when we intentionally killed the launched process during cleanup.
+			return nil
+		}
 		return err
 	}
 	return nil
