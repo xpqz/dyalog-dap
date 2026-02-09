@@ -127,7 +127,7 @@ DYALOG_RIDE_ADDR=127.0.0.1:4502 go run ./cmd/dap-adapter
 - Integration harness with protocol transcript artifacts
 - CI gating + VS Code smoke workflow scaffolding
 
-Current limitation: the repository still lacks a packaged VS Code extension/debugger type contribution; adapter usage currently depends on an external DAP client configuration.
+Current limitation: the repository has extension source and CI package checks, but no published Marketplace/VSIX release workflow is in active use yet.
 
 ## Day-to-Day Development
 
@@ -196,9 +196,19 @@ Example debug configuration:
 To try it quickly:
 
 1. Build adapter binary at repo root: `go build ./cmd/dap-adapter`
-2. Open `vscode-extension/` in VS Code
-3. Press `F5` to launch an Extension Development Host
-4. In the Extension Host, use the above `launch.json` configuration
+2. Build and test extension package:
+
+```bash
+cd vscode-extension
+npm install
+npm run lint
+npm run test
+npm run build
+```
+
+3. Open `vscode-extension/` in VS Code
+4. Press `F5` to launch an Extension Development Host
+5. In the Extension Host, use the above `launch.json` configuration
 
 ## Live Dyalog Integration Harness
 

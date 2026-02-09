@@ -236,3 +236,56 @@ func TestScaffold_HasVSCodeExtensionEntrypoint(t *testing.T) {
 		t.Fatalf("missing vscode-extension/out/extension.js: %v", err)
 	}
 }
+
+func TestScaffold_HasVSCodeExtensionTypeScriptPipeline(t *testing.T) {
+	requiredFiles := []string{
+		"vscode-extension/src/extension.ts",
+		"vscode-extension/tsconfig.json",
+	}
+	for _, file := range requiredFiles {
+		if _, err := os.Stat(file); err != nil {
+			t.Fatalf("missing extension pipeline file %s: %v", file, err)
+		}
+	}
+
+	data, err := os.ReadFile("vscode-extension/package.json")
+	if err != nil {
+		t.Fatalf("missing vscode-extension/package.json: %v", err)
+	}
+	var pkg struct {
+		Main    string            `json:"main"`
+		Scripts map[string]string `json:"scripts"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		t.Fatalf("vscode-extension/package.json is not valid JSON: %v", err)
+	}
+	if pkg.Main != "./out/extension.js" {
+		t.Fatalf("expected extension main ./out/extension.js, got %q", pkg.Main)
+	}
+	requiredScripts := []string{"build", "lint", "test"}
+	for _, script := range requiredScripts {
+		if strings.TrimSpace(pkg.Scripts[script]) == "" {
+			t.Fatalf("expected vscode-extension package script %q", script)
+		}
+	}
+}
+
+func TestScaffold_HasCIExtensionPackageJob(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/ci.yml")
+	if err != nil {
+		t.Fatalf("missing .github/workflows/ci.yml: %v", err)
+	}
+	text := string(data)
+	requiredSnippets := []string{
+		"extension-package:",
+		"working-directory: vscode-extension",
+		"npm run lint",
+		"npm run test",
+		"npm run build",
+	}
+	for _, snippet := range requiredSnippets {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected CI workflow to contain %q", snippet)
+		}
+	}
+}
