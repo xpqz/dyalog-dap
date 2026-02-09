@@ -457,6 +457,96 @@ func TestDispatcher_DisconnectClearsQueuedCommands(t *testing.T) {
 	}
 }
 
+func TestDispatcher_QuoteQuadPromptTypeDoesNotQueueExecute(t *testing.T) {
+	transport := newMockTransport()
+	dispatcher := NewDispatcher(transport, protocol.NewCodec())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		dispatcher.Run(ctx)
+		close(done)
+	}()
+
+	transport.push(`["SetPromptType",{"type":4}]`)
+	waitForCondition(t, 250*time.Millisecond, func() bool {
+		promptType, known := dispatcher.PromptType()
+		return known && promptType == 4
+	})
+
+	if err := dispatcher.SendCommand("Execute", protocol.ExecuteArgs{Text: "1+1\n", Trace: 0}); err != nil {
+		t.Fatalf("SendCommand Execute failed: %v", err)
+	}
+
+	write := waitForWrite(t, transport.writeCh, 250*time.Millisecond)
+	command, err := decodeCommandName(write)
+	if err != nil {
+		t.Fatalf("decodeCommandName failed: %v", err)
+	}
+	if command != "Execute" {
+		t.Fatalf("expected immediate Execute in quote-quad mode, got %q", command)
+	}
+
+	transport.close()
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("dispatcher did not stop")
+	}
+}
+
+func TestDispatcher_QueuedExecuteFlushesOnPromptTypeTransitionToQuoteQuad(t *testing.T) {
+	transport := newMockTransport()
+	dispatcher := NewDispatcher(transport, protocol.NewCodec())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		dispatcher.Run(ctx)
+		close(done)
+	}()
+
+	transport.push(`["SetPromptType",{"type":0}]`)
+	waitForCondition(t, 250*time.Millisecond, func() bool {
+		promptType, known := dispatcher.PromptType()
+		return known && promptType == 0
+	})
+
+	if err := dispatcher.SendCommand("Execute", protocol.ExecuteArgs{Text: "queued\n", Trace: 0}); err != nil {
+		t.Fatalf("queue Execute failed: %v", err)
+	}
+	select {
+	case payload := <-transport.writeCh:
+		command, _ := decodeCommandName(payload)
+		t.Fatalf("expected Execute queued while busy, got %q", command)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	transport.push(`["SetPromptType",{"type":4}]`)
+
+	write := waitForWrite(t, transport.writeCh, 250*time.Millisecond)
+	command, err := decodeCommandName(write)
+	if err != nil {
+		t.Fatalf("decodeCommandName failed: %v", err)
+	}
+	if command != "Execute" {
+		t.Fatalf("expected queued Execute flush on promptType=4, got %q", command)
+	}
+
+	transport.close()
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("dispatcher did not stop")
+	}
+}
+
+func TestDispatcher_PromptTypeModeSemanticsAcrossInterpreterVersions(t *testing.T) {
+	t.Skip("Known limitation: promptType 2/5 interpreter-version semantics are not fully specified; live matrix validation tracked in integration tasks")
+}
+
 func TestDispatcher_PublishDoesNotPanicWhenSubscriberChannelIsClosed(t *testing.T) {
 	dispatcher := NewDispatcher(newMockTransport(), protocol.NewCodec())
 	_, _ = dispatcher.Subscribe(1)
