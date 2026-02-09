@@ -46,6 +46,21 @@ func (c *Client) AttachConn(conn net.Conn) {
 	c.rd = bufio.NewReader(conn)
 }
 
+// Close closes and detaches the active connection, if any.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn == nil {
+		return nil
+	}
+
+	err := c.conn.Close()
+	c.conn = nil
+	c.rd = nil
+	return err
+}
+
 // SetTrafficLogger enables structured inbound/outbound payload logging.
 func (c *Client) SetTrafficLogger(logger TrafficLogger) {
 	c.mu.Lock()

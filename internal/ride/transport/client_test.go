@@ -271,6 +271,25 @@ func TestInitializeSession_ErrsOnUnexpectedServerProtocol(t *testing.T) {
 	}
 }
 
+func TestClose_DetachesActiveConnection(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer serverConn.Close()
+
+	client := NewClient()
+	client.AttachConn(clientConn)
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close should be idempotent, got: %v", err)
+	}
+
+	if err := client.WritePayload("hello"); !errors.Is(err, ErrNoConnection) {
+		t.Fatalf("expected ErrNoConnection after close, got %v", err)
+	}
+}
+
 func writeFrame(w io.Writer, payload string) error {
 	frameLen := uint32(len(payload) + 8)
 	if err := binary.Write(w, binary.BigEndian, frameLen); err != nil {
