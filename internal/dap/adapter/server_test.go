@@ -480,3 +480,145 @@ func TestHandleRequest_ThreadsWithoutRideControllerFails(t *testing.T) {
 		t.Fatal("expected threads request without controller to fail")
 	}
 }
+
+func TestHandleRequest_StackTraceBuildsFramesFromTracerWindows(t *testing.T) {
+	ride := &mockRideController{}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:         101,
+			Debugger:      true,
+			Tid:           2,
+			Name:          "Caller",
+			CurrentRow:    5,
+			CurrentColumn: 1,
+		},
+	})
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:         102,
+			Debugger:      true,
+			Tid:           2,
+			Name:          "Top",
+			CurrentRow:    6,
+			CurrentColumn: 2,
+		},
+	})
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "SetHighlightLine",
+		Args: protocol.SetHighlightLineArgs{
+			Win:      102,
+			Line:     7,
+			StartCol: 3,
+		},
+	})
+
+	resp, _ := server.HandleRequest(Request{
+		Seq:     60,
+		Command: "stackTrace",
+		Arguments: map[string]any{
+			"threadId": 2,
+		},
+	})
+	if !resp.Success {
+		t.Fatalf("expected stackTrace success, got %s", resp.Message)
+	}
+
+	body, ok := resp.Body.(StackTraceResponseBody)
+	if !ok {
+		t.Fatalf("expected StackTraceResponseBody, got %T", resp.Body)
+	}
+	if len(body.StackFrames) != 2 {
+		t.Fatalf("expected 2 frames, got %d", len(body.StackFrames))
+	}
+	if body.StackFrames[0].ID != 102 || body.StackFrames[0].Name != "Top" {
+		t.Fatalf("unexpected top frame: %#v", body.StackFrames[0])
+	}
+	if body.StackFrames[0].Line != 8 || body.StackFrames[0].Column != 4 {
+		t.Fatalf("unexpected top frame location: %#v", body.StackFrames[0])
+	}
+	if body.StackFrames[1].ID != 101 || body.StackFrames[1].Name != "Caller" {
+		t.Fatalf("unexpected caller frame: %#v", body.StackFrames[1])
+	}
+}
+
+func TestHandleRequest_StackTraceUsesReplyGetSIStackDescriptions(t *testing.T) {
+	ride := &mockRideController{}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:         201,
+			Debugger:      true,
+			Tid:           4,
+			Name:          "OrigA",
+			CurrentRow:    1,
+			CurrentColumn: 1,
+		},
+	})
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "OpenWindow",
+		Args: protocol.WindowContentArgs{
+			Token:         202,
+			Debugger:      true,
+			Tid:           4,
+			Name:          "OrigB",
+			CurrentRow:    2,
+			CurrentColumn: 1,
+		},
+	})
+	server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "ReplyGetSIStack",
+		Args: protocol.ReplyGetSIStackArgs{
+			Tid: 4,
+			Stack: []protocol.SIStackEntry{
+				{Description: "TopFn"},
+				{Description: "CallerFn"},
+			},
+		},
+	})
+
+	resp, _ := server.HandleRequest(Request{
+		Seq:     61,
+		Command: "stackTrace",
+		Arguments: map[string]any{
+			"threadId": 4,
+		},
+	})
+	if !resp.Success {
+		t.Fatalf("expected stackTrace success, got %s", resp.Message)
+	}
+	body := resp.Body.(StackTraceResponseBody)
+	if len(body.StackFrames) != 2 {
+		t.Fatalf("expected 2 frames, got %d", len(body.StackFrames))
+	}
+	if body.StackFrames[0].Name != "TopFn" || body.StackFrames[1].Name != "CallerFn" {
+		t.Fatalf("expected SI-enriched names, got %#v", body.StackFrames)
+	}
+}
+
+func TestHandleRequest_StackTraceWithoutThreadIDFails(t *testing.T) {
+	ride := &mockRideController{}
+	server := NewServer()
+	server.SetRideController(ride)
+	enterRunningState(t, server)
+
+	resp, _ := server.HandleRequest(Request{Seq: 62, Command: "stackTrace"})
+	if resp.Success {
+		t.Fatal("expected stackTrace without threadId to fail")
+	}
+}

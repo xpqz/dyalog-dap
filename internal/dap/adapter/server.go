@@ -40,6 +40,20 @@ type ThreadsResponseBody struct {
 	Threads []Thread `json:"threads"`
 }
 
+// StackFrame represents one DAP stack frame.
+type StackFrame struct {
+	ID     int    `json:"id"`
+	Name   string `json:"name"`
+	Line   int    `json:"line"`
+	Column int    `json:"column"`
+}
+
+// StackTraceResponseBody is returned by DAP stackTrace requests.
+type StackTraceResponseBody struct {
+	StackFrames []StackFrame `json:"stackFrames"`
+	TotalFrames int          `json:"totalFrames"`
+}
+
 // Capabilities describes the adapter's currently supported DAP feature set.
 type Capabilities struct {
 	SupportsConfigurationDoneRequest  bool `json:"supportsConfigurationDoneRequest"`
@@ -76,6 +90,8 @@ type Server struct {
 	tracerWindows      map[int]tracerWindowState
 	threadCache        map[int]Thread
 	threadOrder        []int
+	siDescriptions     map[int][]string
+	tracerOrder        []int
 	syntheticThreadIDs map[string]int
 	nextSyntheticID    int
 	pauseFallback      func() error
@@ -88,6 +104,9 @@ type RideCommandSender interface {
 
 type tracerWindowState struct {
 	threadID int
+	name     string
+	line     int
+	column   int
 }
 
 // StoppedEventBody is emitted for DAP stopped events synthesized from RIDE lifecycle signals.
@@ -117,6 +136,8 @@ func NewServer() *Server {
 		tracerWindows:      map[int]tracerWindowState{},
 		threadCache:        map[int]Thread{},
 		threadOrder:        nil,
+		siDescriptions:     map[int][]string{},
+		tracerOrder:        nil,
 		syntheticThreadIDs: map[string]int{},
 		nextSyntheticID:    1000000,
 	}
@@ -189,6 +210,8 @@ func (s *Server) HandleRequest(req Request) (Response, []Event) {
 		return s.handleControlCommand(req), nil
 	case "threads":
 		return s.handleThreadsRequest(req), nil
+	case "stackTrace":
+		return s.handleStackTraceRequest(req), nil
 
 	default:
 		return s.failure(req, "unsupported command"), nil
@@ -259,6 +282,28 @@ func (s *Server) handleThreadsRequest(req Request) Response {
 	}
 }
 
+func (s *Server) handleStackTraceRequest(req Request) Response {
+	if s.state != stateAttachedOrLaunched {
+		return s.failure(req, "stackTrace requires launch or attach")
+	}
+
+	threadID := extractThreadIDArgument(req.Arguments)
+	if threadID <= 0 {
+		return s.failure(req, "stackTrace requires threadId")
+	}
+
+	frames := s.buildStackFramesForThread(threadID)
+	return Response{
+		RequestSeq: req.Seq,
+		Command:    req.Command,
+		Success:    true,
+		Body: StackTraceResponseBody{
+			StackFrames: frames,
+			TotalFrames: len(frames),
+		},
+	}
+}
+
 // HandleRidePayload updates adapter runtime stop state from inbound RIDE events.
 func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 	s.mu.Lock()
@@ -276,6 +321,17 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 		}
 		s.updateThreadCache(reply)
 		return nil
+	case "ReplyGetSIStack":
+		reply, ok := extractReplyGetSIStack(decoded.Args)
+		if !ok {
+			return nil
+		}
+		si := make([]string, 0, len(reply.Stack))
+		for _, frame := range reply.Stack {
+			si = append(si, frame.Description)
+		}
+		s.siDescriptions[reply.Tid] = si
+		return nil
 
 	case "OpenWindow":
 		window, ok := extractWindowContent(decoded.Args)
@@ -289,6 +345,15 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 		}
 		if window.Tid > 0 {
 			windowState.threadID = window.Tid
+		}
+		if window.Name != "" {
+			windowState.name = window.Name
+		}
+		windowState.line = window.CurrentRow
+		windowState.column = window.CurrentColumn
+
+		if _, exists := s.tracerWindows[window.Token]; !exists {
+			s.tracerOrder = append(s.tracerOrder, window.Token)
 		}
 		s.tracerWindows[window.Token] = windowState
 		s.activeTracerWindow = window.Token
@@ -311,6 +376,11 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 		if highlight.Win > 0 {
 			s.activeTracerWindow = highlight.Win
 			s.activeTracerSet = true
+		}
+		if state, ok := s.tracerWindows[highlight.Win]; ok {
+			state.line = highlight.Line
+			state.column = highlight.StartCol
+			s.tracerWindows[highlight.Win] = state
 		}
 
 		if threadID := s.threadForWindow(s.activeTracerWindow); threadID > 0 {
@@ -400,6 +470,44 @@ func (s *Server) snapshotThreads() []Thread {
 	}
 
 	return threads
+}
+
+func (s *Server) buildStackFramesForThread(threadID int) []StackFrame {
+	frames := make([]StackFrame, 0)
+
+	for i := len(s.tracerOrder) - 1; i >= 0; i-- {
+		token := s.tracerOrder[i]
+		window, ok := s.tracerWindows[token]
+		if !ok {
+			continue
+		}
+		if window.threadID != threadID {
+			continue
+		}
+
+		name := window.name
+		if name == "" {
+			name = fmt.Sprintf("Frame %d", token)
+		}
+
+		frames = append(frames, StackFrame{
+			ID:     token,
+			Name:   name,
+			Line:   oneBased(window.line),
+			Column: oneBased(window.column),
+		})
+	}
+
+	if names, ok := s.siDescriptions[threadID]; ok {
+		for i := 0; i < len(frames) && i < len(names); i++ {
+			if names[i] == "" {
+				continue
+			}
+			frames[i].Name = names[i]
+		}
+	}
+
+	return frames
 }
 
 func (s *Server) newStoppedEventBody(reason, description string) StoppedEventBody {
@@ -514,6 +622,54 @@ func extractReplyGetThreads(args any) (protocol.ReplyGetThreadsArgs, bool) {
 	default:
 		return protocol.ReplyGetThreadsArgs{}, false
 	}
+}
+
+func extractReplyGetSIStack(args any) (protocol.ReplyGetSIStackArgs, bool) {
+	switch v := args.(type) {
+	case protocol.ReplyGetSIStackArgs:
+		return v, true
+	case map[string]any:
+		rawStack, ok := v["stack"].([]any)
+		if !ok {
+			return protocol.ReplyGetSIStackArgs{}, false
+		}
+
+		stack := make([]protocol.SIStackEntry, 0, len(rawStack))
+		for _, raw := range rawStack {
+			entryMap, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			stack = append(stack, protocol.SIStackEntry{
+				Description: stringFromAny(entryMap["description"]),
+			})
+		}
+
+		return protocol.ReplyGetSIStackArgs{
+			Tid:   intFromAny(v["tid"]),
+			Stack: stack,
+		}, true
+	default:
+		return protocol.ReplyGetSIStackArgs{}, false
+	}
+}
+
+func extractThreadIDArgument(args any) int {
+	if args == nil {
+		return 0
+	}
+	m, ok := args.(map[string]any)
+	if !ok {
+		return 0
+	}
+	return intFromAny(m["threadId"])
+}
+
+func oneBased(value int) int {
+	if value < 0 {
+		return 1
+	}
+	return value + 1
 }
 
 func intFromAny(v any) int {
