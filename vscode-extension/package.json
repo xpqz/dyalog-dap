@@ -34,11 +34,13 @@
     "build": "tsc -p .",
     "lint": "tsc -p . --noEmit",
     "test": "npm run build && node --test out/test/*.test.js",
+    "test:exthost": "npm run build && node ./out/test/exthost/runTest.js",
     "test:contracts": "npm run build && node --test out/test/contracts.test.js",
     "check:manifest": "npm run build && vsce ls",
     "package:vsix": "npm run check:manifest && vsce package"
   },
   "devDependencies": {
+    "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.6.1",
     "@types/node": "^20.17.0",
     "@types/vscode": "^1.85.0",

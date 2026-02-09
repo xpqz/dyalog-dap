@@ -709,3 +709,47 @@ func TestScaffold_HasBetaReadinessPolicyAndSupportMatrix(t *testing.T) {
 		}
 	}
 }
+
+func TestScaffold_HasExtensionHostTestHarnessForDiagnosticBundle(t *testing.T) {
+	pkgData, err := os.ReadFile("vscode-extension/package.json")
+	if err != nil {
+		t.Fatalf("missing vscode-extension/package.json: %v", err)
+	}
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if err := json.Unmarshal(pkgData, &pkg); err != nil {
+		t.Fatalf("vscode-extension/package.json is not valid JSON: %v", err)
+	}
+	if _, ok := pkg.Scripts["test:exthost"]; !ok {
+		t.Fatalf("expected vscode-extension/package.json to define scripts.test:exthost")
+	}
+
+	requiredFiles := []string{
+		"vscode-extension/src/test/exthost/runTest.ts",
+		"vscode-extension/src/test/exthost/suite/index.ts",
+		"vscode-extension/src/test/exthost/suite/diagnosticBundle.exthost.test.ts",
+		".github/workflows/vscode-extension-host.yml",
+	}
+	for _, file := range requiredFiles {
+		if _, err := os.Stat(file); err != nil {
+			t.Fatalf("missing %s: %v", file, err)
+		}
+	}
+
+	readme, err := os.ReadFile("vscode-extension/README.md")
+	if err != nil {
+		t.Fatalf("missing vscode-extension/README.md: %v", err)
+	}
+	text := strings.ToLower(string(readme))
+	requiredSnippets := []string{
+		"extension host",
+		"npm run test:exthost",
+		"ci",
+	}
+	for _, snippet := range requiredSnippets {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected vscode-extension/README.md to contain %q", snippet)
+		}
+	}
+}
