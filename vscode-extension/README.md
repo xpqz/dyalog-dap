@@ -17,10 +17,17 @@ Available commands from the VS Code command palette:
 - `Dyalog DAP: Validate RIDE Address` validates `rideAddr` formatting (`host:port`).
 - `Dyalog DAP: Toggle Verbose Diagnostics` toggles extra diagnostic output for support sessions.
 - `Dyalog DAP: Generate Diagnostic Bundle` writes a redacted support bundle to `.dyalog-dap/support/`.
+- `Dyalog DAP: Install/Update Adapter` downloads the latest platform adapter from GitHub Releases and verifies checksums before installation.
 
 Runtime diagnostics are written to the `Dyalog DAP` output channel.
 Use verbose diagnostics when you need deeper startup/runtime traces without telemetry.
 For first-pass support handling, see `../docs/support/triage.md`.
+
+Installer notes:
+
+- installer source: GitHub Releases (`xpqz/dyalog-dap`)
+- archive integrity is verified against `checksums.txt`
+- successful install stores a managed adapter path in extension settings for automatic fallback
 
 ## Local Development
 

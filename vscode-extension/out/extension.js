@@ -41,6 +41,7 @@ exports.deactivate = deactivate;
 const path_1 = __importDefault(require("path"));
 const vscode = __importStar(require("vscode"));
 const adapterPath_1 = require("./adapterPath");
+const adapterInstaller_1 = require("./adapterInstaller");
 const contracts_1 = require("./contracts");
 const diagnosticsBundle_1 = require("./diagnosticsBundle");
 const setup_1 = require("./setup");
@@ -67,6 +68,9 @@ function activate(context) {
     const generateDiagnosticBundleCommand = vscode.commands.registerCommand("dyalogDap.generateDiagnosticBundle", async () => {
         await runGenerateDiagnosticBundle(output, diagnostics, context.extension.packageJSON.version ?? "unknown");
     });
+    const installAdapterCommand = vscode.commands.registerCommand("dyalogDap.installAdapter", async () => {
+        await runInstallAdapter(output, diagnostics, context);
+    });
     const configProvider = vscode.debug.registerDebugConfigurationProvider("dyalog-dap", {
         resolveDebugConfiguration(_folder, config) {
             return (0, contracts_1.resolveDebugConfigurationContract)(config);
@@ -75,7 +79,8 @@ function activate(context) {
     const descriptorFactory = vscode.debug.registerDebugAdapterDescriptorFactory("dyalog-dap", {
         createDebugAdapterDescriptor(session) {
             const config = (session.configuration ?? {});
-            const contract = (0, contracts_1.buildAdapterLaunchContract)(config, session.workspaceFolder?.uri?.fsPath ?? "", process.env);
+            const normalizedConfig = applyInstalledAdapterFallback(config);
+            const contract = (0, contracts_1.buildAdapterLaunchContract)(normalizedConfig, session.workspaceFolder?.uri?.fsPath ?? "", process.env);
             if (typeof contract.error === "string" && contract.error !== "") {
                 logDiagnostic(output, diagnostics, "error", "adapter.resolve.failed", {
                     rideAddr: asNonEmptyString(config.rideAddr),
@@ -98,7 +103,7 @@ function activate(context) {
             return new vscode.DebugAdapterExecutable(adapterPath, args, { env });
         }
     });
-    context.subscriptions.push(setupLaunchCommand, validateAdapterPathCommand, validateRideAddrCommand, toggleDiagnosticsVerboseCommand, generateDiagnosticBundleCommand, configProvider, descriptorFactory);
+    context.subscriptions.push(setupLaunchCommand, validateAdapterPathCommand, validateRideAddrCommand, toggleDiagnosticsVerboseCommand, generateDiagnosticBundleCommand, installAdapterCommand, configProvider, descriptorFactory);
 }
 function deactivate() { }
 async function runSetupLaunchConfig(output, diagnostics) {
@@ -226,6 +231,32 @@ async function runGenerateDiagnosticBundle(output, diagnostics, extensionVersion
     output.show(true);
     void vscode.window.showInformationMessage(`Dyalog diagnostic bundle written to ${bundleFile.fsPath}`);
 }
+async function runInstallAdapter(output, diagnostics, context) {
+    try {
+        const installRoot = path_1.default.join(context.globalStorageUri.fsPath, "adapter");
+        const result = await (0, adapterInstaller_1.installAdapterFromLatestRelease)({
+            installRoot,
+            platform: process.platform,
+            arch: process.arch
+        });
+        await vscode.workspace
+            .getConfiguration("dyalogDap")
+            .update("adapter.installedPath", result.adapterPath, vscode.ConfigurationTarget.Global);
+        logDiagnostic(output, diagnostics, "info", "adapter.install.success", {
+            path: result.adapterPath,
+            release: result.versionTag,
+            asset: result.assetName
+        });
+        output.show(true);
+        void vscode.window.showInformationMessage(`Installed adapter ${result.versionTag} (${result.assetName}) to ${result.adapterPath}.`);
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logDiagnostic(output, diagnostics, "error", "adapter.install.failed", { error: message });
+        output.show(true);
+        void vscode.window.showErrorMessage(`Failed to install adapter: ${message}`);
+    }
+}
 function readLaunchConfigurations(workspaceFolder) {
     const launchConfigs = vscode.workspace
         .getConfiguration("launch", workspaceFolder)
@@ -276,6 +307,22 @@ function filterEnvironmentForBundle(env) {
         }
     }
     return snapshot;
+}
+function applyInstalledAdapterFallback(config) {
+    if (asNonEmptyString(config.adapterPath) !== "") {
+        return config;
+    }
+    const installed = vscode.workspace
+        .getConfiguration("dyalogDap")
+        .get("adapter.installedPath", "")
+        .trim();
+    if (installed === "") {
+        return config;
+    }
+    return {
+        ...config,
+        adapterPath: installed
+    };
 }
 function logDiagnostic(output, diagnostics, level, message, fields) {
     if (level === "debug" && !isVerboseDiagnosticsEnabled()) {
