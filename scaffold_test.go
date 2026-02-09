@@ -120,3 +120,22 @@ func TestScaffold_HasCIWorkflowWithCriticalAndLiveJobs(t *testing.T) {
 		}
 	}
 }
+
+func TestScaffold_HasAssumptionsTraceabilityDoc(t *testing.T) {
+	data, err := os.ReadFile("docs/traceability/assumptions.md")
+	if err != nil {
+		t.Fatalf("missing docs/traceability/assumptions.md: %v", err)
+	}
+	text := string(data)
+	requiredSnippets := []string{
+		"# Implementation Assumptions and Plan Traceability",
+		"## Plan References",
+		"## Feature Traceability Matrix",
+		"## Validated Deviations",
+	}
+	for _, snippet := range requiredSnippets {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected assumptions doc to contain %q", snippet)
+		}
+	}
+}
