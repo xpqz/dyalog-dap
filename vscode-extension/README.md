@@ -30,8 +30,22 @@ npm ci
 npm run lint
 npm run test:contracts
 npm run test
+npm run test:exthost
 npm run build
 ```
+
+## Extension Host Integration Tests
+
+The `test:exthost` script launches a real VS Code Extension Host and runs integration coverage for extension workflows (including diagnostic bundle command execution).
+
+```bash
+cd vscode-extension
+npm run test:exthost
+```
+
+CI executes this flow with the workflow:
+
+- `/Users/stefan/work/lsp-dap/.github/workflows/vscode-extension-host.yml`
 
 ## Package VSIX
 
