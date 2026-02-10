@@ -191,6 +191,21 @@ type RideCommandSender interface {
 	SendCommand(command string, args any) error
 }
 
+type outboundIntentKind string
+
+const outboundIntentDeferredBreakpoints outboundIntentKind = "deferred-breakpoints-apply"
+
+type outboundCommandIntent struct {
+	controller RideCommandSender
+	kind       outboundIntentKind
+	command    string
+	args       map[string]any
+	token      int
+	sourceRef  int
+	path       string
+	lines      []int
+}
+
 type tracerWindowState struct {
 	threadID int
 	name     string
@@ -895,9 +910,21 @@ func (s *Server) handleSourceRequest(req Request) Response {
 }
 
 // HandleRidePayload updates adapter runtime stop state from inbound RIDE events.
-func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
+func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) (events []Event) {
+	var intents []outboundCommandIntent
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer func() {
+		s.mu.Unlock()
+		if len(intents) == 0 {
+			return
+		}
+		intentEvents := s.executeOutboundIntents(intents)
+		if len(intentEvents) == 0 {
+			return
+		}
+		// Intent side-effects should remain ahead of trailing lifecycle events (for example stopped).
+		events = append(intentEvents, events...)
+	}()
 
 	if decoded.Kind != protocol.KindCommand {
 		return nil
@@ -919,11 +946,13 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 		}
 		s.bindTokenToSource(window.Token, window.Filename, window.Name)
 		s.storeSourceText(window.Filename, window.Text)
-		events := s.applyDeferredBreakpoints(window.Token)
+		if intent, ok := s.collectDeferredBreakpointIntentLocked(window.Token); ok {
+			intents = append(intents, intent)
+		}
 		if window.Debugger {
 			s.updateTracerWindow(window)
 		}
-		return events
+		return nil
 
 	case "CloseWindow":
 		windowArgs, ok := extractWindowArgs(decoded.Args)
@@ -951,9 +980,11 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 		}
 		s.bindTokenToSource(window.Token, window.Filename, window.Name)
 		s.storeSourceText(window.Filename, window.Text)
-		events := s.applyDeferredBreakpoints(window.Token)
+		if intent, ok := s.collectDeferredBreakpointIntentLocked(window.Token); ok {
+			intents = append(intents, intent)
+		}
 		if !window.Debugger {
-			return events
+			return nil
 		}
 
 		s.updateTracerWindow(window)
@@ -965,10 +996,10 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 			s.activeThreadSet = true
 		}
 
-		return append(events, Event{
+		return []Event{{
 			Event: "stopped",
 			Body:  s.newStoppedEventBody("entry", ""),
-		})
+		}}
 
 	case "SetHighlightLine":
 		highlight, ok := extractSetHighlightLine(decoded.Args)
@@ -1809,40 +1840,72 @@ func (s *Server) requestWindowLayoutSync() {
 	_ = s.rideController.SendCommand("GetWindowLayout", map[string]any{})
 }
 
-func (s *Server) applyDeferredBreakpoints(token int) []Event {
+func (s *Server) collectDeferredBreakpointIntentLocked(token int) (outboundCommandIntent, bool) {
 	if s.rideController == nil || token <= 0 {
-		return nil
+		return outboundCommandIntent{}, false
 	}
 
 	binding, ok := s.sourceByToken[token]
 	if !ok {
-		return nil
+		return outboundCommandIntent{}, false
 	}
 
 	lines, ok := s.pendingBySourceRef[binding.sourceRef]
 	if !ok {
 		lines, ok = s.pendingByPath[binding.path]
 		if !ok {
-			return nil
+			return outboundCommandIntent{}, false
 		}
 	}
 
-	if err := s.rideController.SendCommand("SetLineAttributes", map[string]any{
-		"win":     token,
-		"stop":    zeroBasedLines(lines),
-		"monitor": []int{},
-		"trace":   []int{},
-	}); err != nil {
-		return []Event{
-			newOutputEvent("stderr", fmt.Sprintf("breakpoints deferred apply failed (token=%d path=%s): %v", token, binding.path, err)),
+	return outboundCommandIntent{
+		controller: s.rideController,
+		kind:       outboundIntentDeferredBreakpoints,
+		command:    "SetLineAttributes",
+		args: map[string]any{
+			"win":     token,
+			"stop":    zeroBasedLines(lines),
+			"monitor": []int{},
+			"trace":   []int{},
+		},
+		token:     token,
+		sourceRef: binding.sourceRef,
+		path:      binding.path,
+		lines:     append([]int{}, lines...),
+	}, true
+}
+
+func (s *Server) executeOutboundIntents(intents []outboundCommandIntent) []Event {
+	events := make([]Event, 0, len(intents))
+	for _, intent := range intents {
+		if intent.controller == nil {
+			continue
+		}
+		if err := intent.controller.SendCommand(intent.command, intent.args); err != nil {
+			if intent.kind == outboundIntentDeferredBreakpoints {
+				events = append(events, newOutputEvent("stderr", fmt.Sprintf(
+					"breakpoints deferred apply failed (token=%d path=%s): %v",
+					intent.token,
+					intent.path,
+					err,
+				)))
+			}
+			continue
+		}
+
+		switch intent.kind {
+		case outboundIntentDeferredBreakpoints:
+			s.mu.Lock()
+			delete(s.pendingBySourceRef, intent.sourceRef)
+			delete(s.pendingByPath, intent.path)
+			s.mu.Unlock()
+			events = append(events, newOutputEvent(
+				"console",
+				fmt.Sprintf("breakpoints deferred apply succeeded (token=%d path=%s): %v", intent.token, intent.path, intent.lines),
+			))
 		}
 	}
-
-	delete(s.pendingBySourceRef, binding.sourceRef)
-	delete(s.pendingByPath, binding.path)
-	return []Event{
-		newOutputEvent("console", fmt.Sprintf("breakpoints deferred apply succeeded (token=%d path=%s): %v", token, binding.path, lines)),
-	}
+	return events
 }
 
 func buildBreakpointResponses(lines []int, verified bool, message string) []Breakpoint {
