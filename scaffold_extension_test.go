@@ -72,6 +72,7 @@ func TestScaffold_HasVSCodeExtensionEntrypoint(t *testing.T) {
 func TestScaffold_HasVSCodeExtensionTypeScriptPipeline(t *testing.T) {
 	requiredFiles := []string{
 		"vscode-extension/src/extension.ts",
+		"vscode-extension/src/activation.ts",
 		"vscode-extension/tsconfig.json",
 	}
 	for _, file := range requiredFiles {
@@ -153,7 +154,7 @@ func TestScaffold_HasExtensionSetupAndDiagnosticsCommands(t *testing.T) {
 }
 
 func TestScaffold_HasExtensionDiagnosticsOutputChannel(t *testing.T) {
-	text := mustReadFile(t, "vscode-extension/src/extension.ts")
+	text := mustReadFile(t, "vscode-extension/src/activation.ts")
 	requireSnippets(t, text,
 		"createOutputChannel(\"Dyalog DAP\")",
 		"dyalogDap.setupLaunchConfig",
