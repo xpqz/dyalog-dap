@@ -195,6 +195,9 @@ func TestScaffold_HasVSCodeExtensionDebuggerContribution(t *testing.T) {
 				Label   string `json:"label"`
 				Program string `json:"program"`
 			} `json:"debuggers"`
+			Breakpoints []struct {
+				Language string `json:"language"`
+			} `json:"breakpoints"`
 		} `json:"contributes"`
 	}
 	if err := json.Unmarshal(data, &pkg); err != nil {
@@ -228,6 +231,17 @@ func TestScaffold_HasVSCodeExtensionDebuggerContribution(t *testing.T) {
 	}
 	if !hasDebugger {
 		t.Fatal("expected debugger contribution for type dyalog-dap")
+	}
+
+	hasAPLBreakpoints := false
+	for _, contribution := range pkg.Contributes.Breakpoints {
+		if contribution.Language == "apl" {
+			hasAPLBreakpoints = true
+			break
+		}
+	}
+	if !hasAPLBreakpoints {
+		t.Fatal("expected breakpoints contribution for language apl")
 	}
 }
 
