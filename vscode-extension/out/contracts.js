@@ -5,9 +5,12 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.resolveDebugConfigurationContract = resolveDebugConfigurationContract;
 exports.buildAdapterLaunchContract = buildAdapterLaunchContract;
+const node_os_1 = __importDefault(require("node:os"));
+const node_path_1 = __importDefault(require("node:path"));
 const fs_1 = __importDefault(require("fs"));
 const adapterPath_1 = require("./adapterPath");
 function resolveDebugConfigurationContract(config) {
+    const defaultTranscriptsDir = "${workspaceFolder}/.dyalog-dap/transcripts";
     if (!config.type && !config.request && !config.name) {
         return {
             type: "dyalog-dap",
@@ -15,6 +18,7 @@ function resolveDebugConfigurationContract(config) {
             request: "launch",
             rideAddr: "127.0.0.1:4502",
             launchExpression: "",
+            rideTranscriptsDir: defaultTranscriptsDir,
             adapterPath: "${workspaceFolder}/dap-adapter"
         };
     }
@@ -27,6 +31,9 @@ function resolveDebugConfigurationContract(config) {
     }
     if (!resolved.name) {
         resolved.name = "Dyalog: Debug";
+    }
+    if (!resolved.rideTranscriptsDir) {
+        resolved.rideTranscriptsDir = defaultTranscriptsDir;
     }
     return resolved;
 }
@@ -57,6 +64,18 @@ function buildAdapterLaunchContract(config, workspacePath, baseEnv = process.env
     if (typeof config.rideAddr === "string" && config.rideAddr !== "" && !env.DYALOG_RIDE_ADDR) {
         env.DYALOG_RIDE_ADDR = config.rideAddr;
     }
+    if (!env.DYALOG_RIDE_TRANSCRIPTS_DIR) {
+        const configured = asNonEmptyString(config.rideTranscriptsDir);
+        if (configured !== "") {
+            env.DYALOG_RIDE_TRANSCRIPTS_DIR = (0, adapterPath_1.expandWorkspace)(configured, workspacePath);
+        }
+        else if (workspacePath !== "") {
+            env.DYALOG_RIDE_TRANSCRIPTS_DIR = node_path_1.default.join(workspacePath, ".dyalog-dap", "transcripts");
+        }
+        else {
+            env.DYALOG_RIDE_TRANSCRIPTS_DIR = node_path_1.default.join(node_os_1.default.tmpdir(), "dyalog-dap", "transcripts");
+        }
+    }
     return {
         adapterPath,
         args,
@@ -71,4 +90,10 @@ function toStringEnv(env) {
         }
     }
     return result;
+}
+function asNonEmptyString(value) {
+    if (typeof value !== "string") {
+        return "";
+    }
+    return value.trim();
 }

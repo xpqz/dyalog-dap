@@ -1,5 +1,7 @@
+import os from "node:os";
+import path from "node:path";
 import fs from "fs";
-import { isObject, resolveAdapterPath, WorkspaceFolderLike } from "./adapterPath";
+import { expandWorkspace, isObject, resolveAdapterPath, WorkspaceFolderLike } from "./adapterPath";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -11,6 +13,7 @@ export type AdapterLaunchContract = {
 };
 
 export function resolveDebugConfigurationContract(config: UnknownRecord): UnknownRecord {
+  const defaultTranscriptsDir = "${workspaceFolder}/.dyalog-dap/transcripts";
   if (!config.type && !config.request && !config.name) {
     return {
       type: "dyalog-dap",
@@ -18,6 +21,7 @@ export function resolveDebugConfigurationContract(config: UnknownRecord): Unknow
       request: "launch",
       rideAddr: "127.0.0.1:4502",
       launchExpression: "",
+      rideTranscriptsDir: defaultTranscriptsDir,
       adapterPath: "${workspaceFolder}/dap-adapter"
     };
   }
@@ -31,6 +35,9 @@ export function resolveDebugConfigurationContract(config: UnknownRecord): Unknow
   }
   if (!resolved.name) {
     resolved.name = "Dyalog: Debug";
+  }
+  if (!resolved.rideTranscriptsDir) {
+    resolved.rideTranscriptsDir = defaultTranscriptsDir;
   }
   return resolved;
 }
@@ -74,6 +81,16 @@ export function buildAdapterLaunchContract(
   if (typeof config.rideAddr === "string" && config.rideAddr !== "" && !env.DYALOG_RIDE_ADDR) {
     env.DYALOG_RIDE_ADDR = config.rideAddr;
   }
+  if (!env.DYALOG_RIDE_TRANSCRIPTS_DIR) {
+    const configured = asNonEmptyString(config.rideTranscriptsDir);
+    if (configured !== "") {
+      env.DYALOG_RIDE_TRANSCRIPTS_DIR = expandWorkspace(configured, workspacePath);
+    } else if (workspacePath !== "") {
+      env.DYALOG_RIDE_TRANSCRIPTS_DIR = path.join(workspacePath, ".dyalog-dap", "transcripts");
+    } else {
+      env.DYALOG_RIDE_TRANSCRIPTS_DIR = path.join(os.tmpdir(), "dyalog-dap", "transcripts");
+    }
+  }
 
   return {
     adapterPath,
@@ -90,4 +107,11 @@ function toStringEnv(env: NodeJS.ProcessEnv): Record<string, string> {
     }
   }
   return result;
+}
+
+function asNonEmptyString(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim();
 }

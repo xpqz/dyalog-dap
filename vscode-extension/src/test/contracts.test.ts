@@ -9,6 +9,7 @@ test("resolveDebugConfigurationContract returns default launch config for empty 
   assert.equal(resolved.name, "Dyalog: Launch (RIDE)");
   assert.equal(resolved.rideAddr, "127.0.0.1:4502");
   assert.equal(resolved.launchExpression, "");
+  assert.equal(resolved.rideTranscriptsDir, "${workspaceFolder}/.dyalog-dap/transcripts");
   assert.equal(resolved.adapterPath, "${workspaceFolder}/dap-adapter");
 });
 
@@ -21,6 +22,7 @@ test("resolveDebugConfigurationContract fills missing fields without clobbering 
   assert.equal(resolved.request, "attach");
   assert.equal(resolved.rideAddr, "localhost:4510");
   assert.equal(resolved.name, "Dyalog: Debug");
+  assert.equal(resolved.rideTranscriptsDir, "${workspaceFolder}/.dyalog-dap/transcripts");
 });
 
 test("buildAdapterLaunchContract maps args and env with launch rideAddr", () => {
@@ -41,6 +43,7 @@ test("buildAdapterLaunchContract maps args and env with launch rideAddr", () => 
   assert.deepEqual(contract.args, ["--verbose"]);
   assert.equal(contract.env.DYALOG_RIDE_ADDR, "127.0.0.1:4502");
   assert.equal(contract.env.FOO, "42");
+  assert.equal(contract.env.DYALOG_RIDE_TRANSCRIPTS_DIR, "/tmp/ws/.dyalog-dap/transcripts");
 });
 
 test("buildAdapterLaunchContract does not overwrite existing DYALOG_RIDE_ADDR", () => {
@@ -56,6 +59,22 @@ test("buildAdapterLaunchContract does not overwrite existing DYALOG_RIDE_ADDR", 
   );
   assert.equal(contract.error, undefined);
   assert.equal(contract.env.DYALOG_RIDE_ADDR, "10.0.0.1:4502");
+});
+
+test("buildAdapterLaunchContract maps rideTranscriptsDir into adapter env", () => {
+  const contract = buildAdapterLaunchContract(
+    {
+      request: "launch",
+      rideAddr: "127.0.0.1:4502",
+      rideTranscriptsDir: "${workspaceFolder}/custom-transcripts"
+    },
+    "/tmp/ws",
+    {},
+    (candidate: string) => candidate === "/tmp/ws/dap-adapter",
+    "linux"
+  );
+  assert.equal(contract.error, undefined);
+  assert.equal(contract.env.DYALOG_RIDE_TRANSCRIPTS_DIR, "/tmp/ws/custom-transcripts");
 });
 
 test("buildAdapterLaunchContract returns actionable error when adapter is missing", () => {

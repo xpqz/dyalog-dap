@@ -21,7 +21,7 @@ Release page:
 2. Install the VSIX:
 
 ```bash
-code --install-extension dyalog-dap-0.1.0-beta.7.vsix --force
+code --install-extension dyalog-dap-0.1.0-beta.8.vsix --force
 ```
 
 3. In VS Code, open Command Palette and run:
@@ -64,7 +64,8 @@ Minimal launch config:
   "type": "dyalog-dap",
   "request": "launch",
   "rideAddr": "127.0.0.1:4502",
-  "launchExpression": "#.MyNs.MyFn 42"
+  "launchExpression": "#.MyNs.MyFn 42",
+  "rideTranscriptsDir": "${workspaceFolder}/.dyalog-dap/transcripts"
 }
 ```
 
@@ -85,6 +86,7 @@ The adapter applies breakpoints first, then evaluates `launchExpression` after `
 Use this to run a function with arguments as the debug entry point.
 
 You can leave `launchExpression` empty if you only want to attach and drive execution manually from Dyalog.
+If omitted, transcript logging defaults to a writable path under your workspace (`.dyalog-dap/transcripts`).
 
 ## APL debug console workflow
 
