@@ -21,7 +21,7 @@ Release page:
 2. Install the VSIX:
 
 ```bash
-code --install-extension dyalog-dap-0.1.0-beta.6.vsix --force
+code --install-extension dyalog-dap-0.1.0-beta.7.vsix --force
 ```
 
 3. In VS Code, open Command Palette and run:

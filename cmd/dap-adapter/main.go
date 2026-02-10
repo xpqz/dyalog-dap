@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/stefan/lsp-dap/internal/ride/protocol"
 	"github.com/stefan/lsp-dap/internal/ride/sessionstate"
 	runtimeconfig "github.com/stefan/lsp-dap/internal/runtime/config"
+	"github.com/stefan/lsp-dap/internal/support/decode"
 )
 
 const runtimeStopWaitTimeout = 3 * time.Second
