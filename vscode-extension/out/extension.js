@@ -39,11 +39,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
 const path_1 = __importDefault(require("path"));
+const node_fs_1 = __importDefault(require("node:fs"));
 const vscode = __importStar(require("vscode"));
 const adapterPath_1 = require("./adapterPath");
 const adapterInstaller_1 = require("./adapterInstaller");
 const contracts_1 = require("./contracts");
 const diagnosticsBundle_1 = require("./diagnosticsBundle");
+const installedAdapterFallback_1 = require("./installedAdapterFallback");
 const setup_1 = require("./setup");
 function activate(context) {
     const output = vscode.window.createOutputChannel("Dyalog DAP");
@@ -79,8 +81,12 @@ function activate(context) {
     const descriptorFactory = vscode.debug.registerDebugAdapterDescriptorFactory("dyalog-dap", {
         createDebugAdapterDescriptor(session) {
             const config = (session.configuration ?? {});
-            const normalizedConfig = applyInstalledAdapterFallback(config);
-            const contract = (0, contracts_1.buildAdapterLaunchContract)(normalizedConfig, session.workspaceFolder?.uri?.fsPath ?? "", process.env);
+            const workspacePath = session.workspaceFolder?.uri?.fsPath ?? "";
+            const installedPath = vscode.workspace
+                .getConfiguration("dyalogDap")
+                .get("adapter.installedPath", "");
+            const normalizedConfig = (0, installedAdapterFallback_1.applyInstalledAdapterFallback)(config, workspacePath, installedPath, node_fs_1.default.existsSync);
+            const contract = (0, contracts_1.buildAdapterLaunchContract)(normalizedConfig, workspacePath, process.env);
             if (typeof contract.error === "string" && contract.error !== "") {
                 logDiagnostic(output, diagnostics, "error", "adapter.resolve.failed", {
                     rideAddr: asNonEmptyString(config.rideAddr),
@@ -307,22 +313,6 @@ function filterEnvironmentForBundle(env) {
         }
     }
     return snapshot;
-}
-function applyInstalledAdapterFallback(config) {
-    if (asNonEmptyString(config.adapterPath) !== "") {
-        return config;
-    }
-    const installed = vscode.workspace
-        .getConfiguration("dyalogDap")
-        .get("adapter.installedPath", "")
-        .trim();
-    if (installed === "") {
-        return config;
-    }
-    return {
-        ...config,
-        adapterPath: installed
-    };
 }
 function logDiagnostic(output, diagnostics, level, message, fields) {
     if (level === "debug" && !isVerboseDiagnosticsEnabled()) {

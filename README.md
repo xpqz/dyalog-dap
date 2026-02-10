@@ -21,7 +21,7 @@ Release page:
 2. Install the VSIX:
 
 ```bash
-code --install-extension dyalog-dap-0.1.0-beta.5.vsix --force
+code --install-extension dyalog-dap-0.1.0-beta.6.vsix --force
 ```
 
 3. In VS Code, open Command Palette and run:
@@ -97,6 +97,7 @@ If debug start fails:
 - confirm `rideAddr` matches that port
 - run `Dyalog DAP: Validate RIDE Address`
 - run `Dyalog DAP: Install/Update Adapter` again
+- if `adapterPath` in `launch.json` points to a missing file, either fix it or remove `adapterPath` to use the installer-managed adapter path
 
 If you need support:
 

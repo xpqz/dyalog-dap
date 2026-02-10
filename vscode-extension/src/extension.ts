@@ -1,9 +1,11 @@
 import path from "path";
+import fs from "node:fs";
 import * as vscode from "vscode";
 import { expandWorkspace, resolveAdapterPath } from "./adapterPath";
 import { installAdapterFromLatestRelease } from "./adapterInstaller";
 import { buildAdapterLaunchContract, resolveDebugConfigurationContract } from "./contracts";
 import { buildDiagnosticBundle } from "./diagnosticsBundle";
+import { applyInstalledAdapterFallback } from "./installedAdapterFallback";
 import {
   ensureLaunchConfigText,
   starterLaunchConfiguration,
@@ -70,10 +72,14 @@ export function activate(context: vscode.ExtensionContext): void {
   const descriptorFactory = vscode.debug.registerDebugAdapterDescriptorFactory("dyalog-dap", {
     createDebugAdapterDescriptor(session) {
       const config = (session.configuration ?? {}) as DebugConfig;
-      const normalizedConfig = applyInstalledAdapterFallback(config);
+      const workspacePath = session.workspaceFolder?.uri?.fsPath ?? "";
+      const installedPath = vscode.workspace
+        .getConfiguration("dyalogDap")
+        .get<string>("adapter.installedPath", "");
+      const normalizedConfig = applyInstalledAdapterFallback(config, workspacePath, installedPath, fs.existsSync);
       const contract = buildAdapterLaunchContract(
         normalizedConfig as Record<string, unknown>,
-        session.workspaceFolder?.uri?.fsPath ?? "",
+        workspacePath,
         process.env
       );
       if (typeof contract.error === "string" && contract.error !== "") {
@@ -384,23 +390,6 @@ function filterEnvironmentForBundle(env: NodeJS.ProcessEnv): Record<string, stri
     }
   }
   return snapshot;
-}
-
-function applyInstalledAdapterFallback(config: DebugConfig): DebugConfig {
-  if (asNonEmptyString(config.adapterPath) !== "") {
-    return config;
-  }
-  const installed = vscode.workspace
-    .getConfiguration("dyalogDap")
-    .get<string>("adapter.installedPath", "")
-    .trim();
-  if (installed === "") {
-    return config;
-  }
-  return {
-    ...config,
-    adapterPath: installed
-  };
 }
 
 function logDiagnostic(
