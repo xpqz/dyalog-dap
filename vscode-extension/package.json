@@ -2,7 +2,7 @@
   "name": "dyalog-dap",
   "displayName": "Dyalog DAP",
   "description": "Minimal VS Code debugger integration for the dyalog-dap adapter.",
-  "version": "0.1.0-beta.3",
+  "version": "0.1.0-beta.4",
   "publisher": "xpqz",
   "repository": {
     "type": "git",
@@ -27,6 +27,7 @@
   "main": "./out/extension.js",
   "files": [
     "out/**/*",
+    "node_modules/**/*",
     "LICENSE.txt",
     "README.md",
     "package.json"
