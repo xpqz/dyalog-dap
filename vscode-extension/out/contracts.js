@@ -11,12 +11,15 @@ const fs_1 = __importDefault(require("fs"));
 const adapterPath_1 = require("./adapterPath");
 function resolveDebugConfigurationContract(config) {
     const defaultTranscriptsDir = "${workspaceFolder}/.dyalog-dap/transcripts";
+    const defaultLinkExpression = "]LINK.Create # .";
     if (!config.type && !config.request && !config.name) {
         return {
             type: "dyalog-dap",
             name: "Dyalog: Launch (RIDE)",
             request: "launch",
             rideAddr: "127.0.0.1:4502",
+            autoLink: true,
+            linkExpression: defaultLinkExpression,
             launchExpression: "",
             rideTranscriptsDir: defaultTranscriptsDir,
             adapterPath: "${workspaceFolder}/dap-adapter"
@@ -31,6 +34,13 @@ function resolveDebugConfigurationContract(config) {
     }
     if (!resolved.name) {
         resolved.name = "Dyalog: Debug";
+    }
+    const request = typeof resolved.request === "string" ? resolved.request : "";
+    if (!("autoLink" in resolved) && request === "launch") {
+        resolved.autoLink = true;
+    }
+    if (!resolved.linkExpression && request === "launch") {
+        resolved.linkExpression = defaultLinkExpression;
     }
     if (!resolved.rideTranscriptsDir) {
         resolved.rideTranscriptsDir = defaultTranscriptsDir;

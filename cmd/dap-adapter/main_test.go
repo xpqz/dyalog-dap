@@ -189,20 +189,48 @@ func TestRun_LaunchAndControlRoundTripAgainstRide(t *testing.T) {
 			return
 		}
 
-		continuePayload, err := rideReadFrame(conn)
-		if err != nil {
-			serverErr <- err
-			return
-		}
-		continueCommand, err := rideDecodeCommandName(continuePayload)
-		if err != nil {
-			serverErr <- err
-			return
-		}
-		if continueCommand != "Continue" {
-			serverErr <- fmt.Errorf("expected Continue, got %q", continueCommand)
-			return
-		}
+			postConfigPayload, err := rideReadFrame(conn)
+			if err != nil {
+				serverErr <- err
+				return
+			}
+			postConfigCommand, err := rideDecodeCommandName(postConfigPayload)
+			if err != nil {
+				serverErr <- err
+				return
+			}
+			if postConfigCommand != "Execute" {
+				serverErr <- fmt.Errorf("expected Execute for launch auto-link, got %q", postConfigCommand)
+				return
+			}
+			postConfigText, postConfigTrace, err := rideDecodeExecute(postConfigPayload)
+			if err != nil {
+				serverErr <- err
+				return
+			}
+			if postConfigText != "]LINK.Create # .\n" {
+				serverErr <- fmt.Errorf("unexpected auto-link Execute text %q", postConfigText)
+				return
+			}
+			if postConfigTrace != 0 {
+				serverErr <- fmt.Errorf("unexpected auto-link Execute trace %d", postConfigTrace)
+				return
+			}
+
+			continuePayload, err := rideReadFrame(conn)
+			if err != nil {
+				serverErr <- err
+				return
+			}
+			continueCommand, err := rideDecodeCommandName(continuePayload)
+			if err != nil {
+				serverErr <- err
+				return
+			}
+			if continueCommand != "Continue" {
+				serverErr <- fmt.Errorf("expected Continue, got %q", continueCommand)
+				return
+			}
 
 		serverErr <- nil
 	}()
@@ -329,7 +357,7 @@ func TestRun_LaunchAndControlRoundTripAgainstRide(t *testing.T) {
 	}
 }
 
-func TestRun_LaunchExpressionExecutesAfterConfigurationDone(t *testing.T) {
+func TestRun_LaunchExecutesLinkCreateThenLaunchExpressionAfterConfigurationDone(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen failed: %v", err)
@@ -389,7 +417,7 @@ func TestRun_LaunchExpressionExecutesAfterConfigurationDone(t *testing.T) {
 			serverErr <- err
 			return
 		}
-		if text != "1+1\n" {
+		if text != "]LINK.Create # .\n1+1\n" {
 			serverErr <- fmt.Errorf("unexpected Execute text %q", text)
 			return
 		}
@@ -450,6 +478,131 @@ func TestRun_LaunchExpressionExecutesAfterConfigurationDone(t *testing.T) {
 	case <-preConfigDoneChecked:
 	case <-time.After(1 * time.Second):
 		t.Fatal("timed out waiting for pre-configurationDone assertion")
+	}
+
+	writeReq(3, "configurationDone", nil)
+	if ok, _ := waitForResponse(t, msgs, 3)["success"].(bool); !ok {
+		t.Fatal("configurationDone response was not successful")
+	}
+
+	writeReq(4, "disconnect", nil)
+	if ok, _ := waitForResponse(t, msgs, 4)["success"].(bool); !ok {
+		t.Fatal("disconnect response was not successful")
+	}
+	_ = inW.Close()
+
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("run returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for run to stop")
+	}
+	if err := <-decoderErr; err != nil {
+		t.Fatalf("decode stream failed: %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("fake RIDE server assertions failed: %v", err)
+	}
+}
+
+func TestRun_LaunchAutoLinkDisabledExecutesOnlyLaunchExpression(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+
+		if err := rideHandshake(conn); err != nil {
+			serverErr <- err
+			return
+		}
+
+		payload, err := rideReadFrame(conn)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		command, err := rideDecodeCommandName(payload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if command != "Execute" {
+			serverErr <- fmt.Errorf("expected Execute after configurationDone, got %q", command)
+			return
+		}
+		text, trace, err := rideDecodeExecute(payload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if text != "1+1\n" {
+			serverErr <- fmt.Errorf("unexpected Execute text with autoLink disabled: %q", text)
+			return
+		}
+		if trace != 0 {
+			serverErr <- fmt.Errorf("unexpected Execute trace %d", trace)
+			return
+		}
+		serverErr <- nil
+	}()
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- run(context.Background(), inR, outW, io.Discard)
+		_ = outW.Close()
+	}()
+
+	decoderErr := make(chan error, 1)
+	msgs := make(chan map[string]any, 128)
+	go func() {
+		defer close(msgs)
+		decoderErr <- decodeDAPStream(outR, msgs)
+	}()
+
+	writeReq := func(seq int, command string, args map[string]any) {
+		t.Helper()
+		req := map[string]any{
+			"seq":     seq,
+			"type":    "request",
+			"command": command,
+		}
+		if args != nil {
+			req["arguments"] = args
+		}
+		if err := writeDAPFrame(inW, req); err != nil {
+			t.Fatalf("write %s failed: %v", command, err)
+		}
+	}
+
+	writeReq(1, "initialize", map[string]any{"adapterID": "dyalog-dap"})
+	if ok, _ := waitForResponse(t, msgs, 1)["success"].(bool); !ok {
+		t.Fatal("initialize response was not successful")
+	}
+	waitForEvent(t, msgs, "initialized")
+
+	writeReq(2, "launch", map[string]any{
+		"rideAddr":           ln.Addr().String(),
+		"rideTranscriptsDir": t.TempDir(),
+		"autoLink":           false,
+		"launchExpression":   "1+1",
+	})
+	if ok, _ := waitForResponse(t, msgs, 2)["success"].(bool); !ok {
+		t.Fatal("launch response was not successful")
 	}
 
 	writeReq(3, "configurationDone", nil)

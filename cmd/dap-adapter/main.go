@@ -22,6 +22,7 @@ import (
 )
 
 const runtimeStopWaitTimeout = 3 * time.Second
+const defaultLinkExpression = "]LINK.Create # ."
 
 func main() {
 	if err := run(context.Background(), os.Stdin, os.Stdout, os.Stderr); err != nil {
@@ -187,6 +188,9 @@ type rideRuntime struct {
 	writer      *dapWriter
 	harness     *harness.Harness
 	dispatcher  *sessionstate.Dispatcher
+	requestType string
+	autoLink    bool
+	linkExpr    string
 	launchExpr  string
 	launchRan   bool
 	unsubscribe func()
@@ -220,6 +224,8 @@ func (r *rideRuntime) start(ctx context.Context, requestCommand string, args any
 	if err != nil {
 		return err
 	}
+	autoLink := runtimeAutoLinkFrom(requestCommand, args)
+	linkExpr := runtimeLinkExpressionFrom(requestCommand, args)
 	launchExpr := runtimeLaunchExpressionFrom(args)
 
 	h := harness.New(cfg)
@@ -258,6 +264,9 @@ func (r *rideRuntime) start(ctx context.Context, requestCommand string, args any
 	r.mu.Lock()
 	r.harness = h
 	r.dispatcher = dispatcher
+	r.requestType = requestCommand
+	r.autoLink = autoLink
+	r.linkExpr = linkExpr
 	r.launchExpr = launchExpr
 	r.launchRan = false
 	r.unsubscribe = unsubscribe
@@ -284,6 +293,9 @@ func (r *rideRuntime) stop() error {
 
 	r.harness = nil
 	r.dispatcher = nil
+	r.requestType = ""
+	r.autoLink = false
+	r.linkExpr = ""
 	r.launchExpr = ""
 	r.launchRan = false
 	r.unsubscribe = nil
@@ -322,20 +334,29 @@ func (r *rideRuntime) stop() error {
 func (r *rideRuntime) executeConfiguredLaunchExpression() error {
 	r.mu.Lock()
 	dispatcher := r.dispatcher
+	requestType := r.requestType
+	autoLink := r.autoLink
+	linkExpr := strings.TrimSpace(r.linkExpr)
 	expr := strings.TrimSpace(r.launchExpr)
 	alreadyRan := r.launchRan
 	if dispatcher == nil {
 		r.mu.Unlock()
 		return errors.New("RIDE runtime is not active")
 	}
-	if alreadyRan || expr == "" {
+	if alreadyRan {
+		r.mu.Unlock()
+		return nil
+	}
+	commands := buildPostConfigurationCommands(requestType, autoLink, linkExpr, expr)
+	if len(commands) == 0 {
+		r.launchRan = true
 		r.mu.Unlock()
 		return nil
 	}
 	r.launchRan = true
 	r.mu.Unlock()
 
-	text := expr
+	text := strings.Join(commands, "\n")
 	if !strings.HasSuffix(text, "\n") {
 		text += "\n"
 	}
@@ -346,7 +367,7 @@ func (r *rideRuntime) executeConfiguredLaunchExpression() error {
 		r.mu.Lock()
 		r.launchRan = false
 		r.mu.Unlock()
-		return fmt.Errorf("failed to execute launchExpression: %w", err)
+		return fmt.Errorf("failed to execute post-configuration commands: %w", err)
 	}
 	return nil
 }
@@ -374,6 +395,47 @@ func runtimeLaunchExpressionFrom(arguments any) string {
 	}
 	text, _ := decode.NonEmptyTrimmedStringFromMap(argsMap, "launchExpression")
 	return text
+}
+
+func runtimeAutoLinkFrom(requestCommand string, arguments any) bool {
+	if requestCommand != "launch" {
+		return false
+	}
+	argsMap, ok := arguments.(map[string]any)
+	if !ok {
+		return true
+	}
+	if value, exists := argsMap["autoLink"]; exists {
+		if parsed, ok := decode.Bool(value); ok {
+			return parsed
+		}
+	}
+	return true
+}
+
+func runtimeLinkExpressionFrom(requestCommand string, arguments any) string {
+	if requestCommand != "launch" {
+		return ""
+	}
+	argsMap, ok := arguments.(map[string]any)
+	if !ok {
+		return defaultLinkExpression
+	}
+	if text, ok := decode.NonEmptyTrimmedStringFromMap(argsMap, "linkExpression"); ok {
+		return text
+	}
+	return defaultLinkExpression
+}
+
+func buildPostConfigurationCommands(requestType string, autoLink bool, linkExpr, launchExpr string) []string {
+	commands := make([]string, 0, 2)
+	if requestType == "launch" && autoLink && linkExpr != "" {
+		commands = append(commands, linkExpr)
+	}
+	if launchExpr != "" {
+		commands = append(commands, launchExpr)
+	}
+	return commands
 }
 func readDAPPayload(reader *bufio.Reader) ([]byte, error) {
 	return daptransport.ReadPayload(reader)

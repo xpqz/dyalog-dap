@@ -2,7 +2,7 @@
   "name": "dyalog-dap",
   "displayName": "Dyalog DAP",
   "description": "Minimal VS Code debugger integration for the dyalog-dap adapter.",
-  "version": "0.1.0-beta.8",
+  "version": "0.1.0-beta.9",
   "publisher": "xpqz",
   "repository": {
     "type": "git",
@@ -127,6 +127,16 @@
                 "type": "string",
                 "description": "RIDE endpoint host:port (for example 127.0.0.1:4502)."
               },
+              "autoLink": {
+                "type": "boolean",
+                "default": true,
+                "description": "When true, launch runs ]LINK.Create (using linkExpression) before launchExpression."
+              },
+              "linkExpression": {
+                "type": "string",
+                "default": "]LINK.Create # .",
+                "description": "APL expression used to link workspace code before launchExpression."
+              },
               "rideLaunchCommand": {
                 "type": "string",
                 "description": "Optional shell command to launch Dyalog (adapter sends this to harness)."
@@ -228,6 +238,8 @@
               "type": "dyalog-dap",
               "request": "launch",
               "rideAddr": "127.0.0.1:4502",
+              "autoLink": true,
+              "linkExpression": "]LINK.Create # .",
               "launchExpression": "",
               "rideTranscriptsDir": "${workspaceFolder}/.dyalog-dap/transcripts",
               "adapterPath": "${workspaceFolder}/dap-adapter"

@@ -8,6 +8,8 @@ test("resolveDebugConfigurationContract returns default launch config for empty 
   assert.equal(resolved.request, "launch");
   assert.equal(resolved.name, "Dyalog: Launch (RIDE)");
   assert.equal(resolved.rideAddr, "127.0.0.1:4502");
+  assert.equal(resolved.autoLink, true);
+  assert.equal(resolved.linkExpression, "]LINK.Create # .");
   assert.equal(resolved.launchExpression, "");
   assert.equal(resolved.rideTranscriptsDir, "${workspaceFolder}/.dyalog-dap/transcripts");
   assert.equal(resolved.adapterPath, "${workspaceFolder}/dap-adapter");
@@ -23,6 +25,15 @@ test("resolveDebugConfigurationContract fills missing fields without clobbering 
   assert.equal(resolved.rideAddr, "localhost:4510");
   assert.equal(resolved.name, "Dyalog: Debug");
   assert.equal(resolved.rideTranscriptsDir, "${workspaceFolder}/.dyalog-dap/transcripts");
+});
+
+test("resolveDebugConfigurationContract preserves explicit autoLink false", () => {
+  const resolved = resolveDebugConfigurationContract({
+    request: "launch",
+    autoLink: false
+  });
+  assert.equal(resolved.request, "launch");
+  assert.equal(resolved.autoLink, false);
 });
 
 test("buildAdapterLaunchContract maps args and env with launch rideAddr", () => {

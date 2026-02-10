@@ -12,6 +12,8 @@ test("starterLaunchConfiguration returns working dyalog-dap launch config", () =
   assert.equal(cfg.type, "dyalog-dap");
   assert.equal(cfg.request, "launch");
   assert.equal(cfg.rideAddr, "127.0.0.1:4502");
+  assert.equal(cfg.autoLink, true);
+  assert.equal(cfg.linkExpression, "]LINK.Create # .");
   assert.equal(cfg.launchExpression, "");
   assert.equal(cfg.rideTranscriptsDir, "${workspaceFolder}/.dyalog-dap/transcripts");
   assert.equal(cfg.adapterPath, "${workspaceFolder}/dap-adapter");

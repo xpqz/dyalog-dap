@@ -14,6 +14,8 @@ function starterLaunchConfiguration(adapterPath) {
         type: "dyalog-dap",
         request: "launch",
         rideAddr: "127.0.0.1:4502",
+        autoLink: true,
+        linkExpression: "]LINK.Create # .",
         launchExpression: "",
         rideTranscriptsDir: "${workspaceFolder}/.dyalog-dap/transcripts",
         adapterPath
