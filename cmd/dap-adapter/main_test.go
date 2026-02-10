@@ -189,48 +189,56 @@ func TestRun_LaunchAndControlRoundTripAgainstRide(t *testing.T) {
 			return
 		}
 
-			postConfigPayload, err := rideReadFrame(conn)
-			if err != nil {
-				serverErr <- err
-				return
-			}
-			postConfigCommand, err := rideDecodeCommandName(postConfigPayload)
-			if err != nil {
-				serverErr <- err
-				return
-			}
-			if postConfigCommand != "Execute" {
-				serverErr <- fmt.Errorf("expected Execute for launch auto-link, got %q", postConfigCommand)
-				return
-			}
-			postConfigText, postConfigTrace, err := rideDecodeExecute(postConfigPayload)
-			if err != nil {
-				serverErr <- err
-				return
-			}
-			if postConfigText != "]LINK.Create # .\n" {
-				serverErr <- fmt.Errorf("unexpected auto-link Execute text %q", postConfigText)
-				return
-			}
-			if postConfigTrace != 0 {
-				serverErr <- fmt.Errorf("unexpected auto-link Execute trace %d", postConfigTrace)
-				return
-			}
+		postConfigPayload, err := rideReadFrame(conn)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		postConfigCommand, err := rideDecodeCommandName(postConfigPayload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if postConfigCommand != "Execute" {
+			serverErr <- fmt.Errorf("expected Execute for launch auto-link, got %q", postConfigCommand)
+			return
+		}
+		postConfigText, postConfigTrace, err := rideDecodeExecute(postConfigPayload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if postConfigText != "]LINK.Create # .\n" {
+			serverErr <- fmt.Errorf("unexpected auto-link Execute text %q", postConfigText)
+			return
+		}
+		if postConfigTrace != 0 {
+			serverErr <- fmt.Errorf("unexpected auto-link Execute trace %d", postConfigTrace)
+			return
+		}
+		if err := rideWriteFrame(conn, `["SetPromptType",{"type":0}]`); err != nil {
+			serverErr <- err
+			return
+		}
+		if err := rideWriteFrame(conn, `["SetPromptType",{"type":1}]`); err != nil {
+			serverErr <- err
+			return
+		}
 
-			continuePayload, err := rideReadFrame(conn)
-			if err != nil {
-				serverErr <- err
-				return
-			}
-			continueCommand, err := rideDecodeCommandName(continuePayload)
-			if err != nil {
-				serverErr <- err
-				return
-			}
-			if continueCommand != "Continue" {
-				serverErr <- fmt.Errorf("expected Continue, got %q", continueCommand)
-				return
-			}
+		continuePayload, err := rideReadFrame(conn)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		continueCommand, err := rideDecodeCommandName(continuePayload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if continueCommand != "Continue" {
+			serverErr <- fmt.Errorf("expected Continue, got %q", continueCommand)
+			return
+		}
 
 		serverErr <- nil
 	}()
@@ -417,12 +425,49 @@ func TestRun_LaunchExecutesLinkCreateThenLaunchExpressionAfterConfigurationDone(
 			serverErr <- err
 			return
 		}
-		if text != "]LINK.Create # .\n1+1\n" {
-			serverErr <- fmt.Errorf("unexpected Execute text %q", text)
+		if text != "]LINK.Create # .\n" {
+			serverErr <- fmt.Errorf("unexpected first Execute text %q", text)
 			return
 		}
 		if trace != 0 {
-			serverErr <- fmt.Errorf("unexpected Execute trace %d", trace)
+			serverErr <- fmt.Errorf("unexpected first Execute trace %d", trace)
+			return
+		}
+
+		if err := rideWriteFrame(conn, `["SetPromptType",{"type":0}]`); err != nil {
+			serverErr <- err
+			return
+		}
+		if err := rideWriteFrame(conn, `["SetPromptType",{"type":1}]`); err != nil {
+			serverErr <- err
+			return
+		}
+
+		secondPayload, err := rideReadFrame(conn)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		secondCommand, err := rideDecodeCommandName(secondPayload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if secondCommand != "Execute" {
+			serverErr <- fmt.Errorf("expected second Execute for launchExpression, got %q", secondCommand)
+			return
+		}
+		secondText, secondTrace, err := rideDecodeExecute(secondPayload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if secondText != "1+1\n" {
+			serverErr <- fmt.Errorf("unexpected second Execute text %q", secondText)
+			return
+		}
+		if secondTrace != 0 {
+			serverErr <- fmt.Errorf("unexpected second Execute trace %d", secondTrace)
 			return
 		}
 

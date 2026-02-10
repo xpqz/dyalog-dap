@@ -23,6 +23,7 @@ import (
 
 const runtimeStopWaitTimeout = 3 * time.Second
 const defaultLinkExpression = "]LINK.Create # ."
+const postConfigurationCommandTimeout = 30 * time.Second
 
 func main() {
 	if err := run(context.Background(), os.Stdin, os.Stdout, os.Stderr); err != nil {
@@ -347,29 +348,129 @@ func (r *rideRuntime) executeConfiguredLaunchExpression() error {
 		r.mu.Unlock()
 		return nil
 	}
-	commands := buildPostConfigurationCommands(requestType, autoLink, linkExpr, expr)
-	if len(commands) == 0 {
+	needsLink := requestType == "launch" && autoLink && linkExpr != ""
+	needsLaunch := expr != ""
+	if !needsLink && !needsLaunch {
 		r.launchRan = true
 		r.mu.Unlock()
 		return nil
 	}
-	r.launchRan = true
 	r.mu.Unlock()
 
-	text := strings.Join(commands, "\n")
-	if !strings.HasSuffix(text, "\n") {
-		text += "\n"
+	if needsLink {
+		if err := executeRuntimeCommand(dispatcher, linkExpr, true); err != nil {
+			return fmt.Errorf("failed to execute linkExpression: %w", err)
+		}
+	}
+
+	if needsLaunch {
+		if err := executeRuntimeCommand(dispatcher, expr, false); err != nil {
+			return fmt.Errorf("failed to execute launchExpression: %w", err)
+		}
+	}
+
+	r.mu.Lock()
+	r.launchRan = true
+	r.mu.Unlock()
+	return nil
+}
+
+func executeRuntimeCommand(dispatcher *sessionstate.Dispatcher, text string, waitForCompletion bool) error {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil
+	}
+
+	var (
+		events      <-chan protocol.DecodedPayload
+		unsubscribe func()
+	)
+	if waitForCompletion {
+		events, unsubscribe = dispatcher.Subscribe(1024)
+	}
+	if unsubscribe != nil {
+		defer unsubscribe()
+	}
+
+	if !strings.HasSuffix(trimmed, "\n") {
+		trimmed += "\n"
 	}
 	if err := dispatcher.SendCommand("Execute", map[string]any{
-		"text":  text,
+		"text":  trimmed,
 		"trace": 0,
 	}); err != nil {
-		r.mu.Lock()
-		r.launchRan = false
-		r.mu.Unlock()
-		return fmt.Errorf("failed to execute post-configuration commands: %w", err)
+		return err
 	}
-	return nil
+
+	if !waitForCompletion || events == nil {
+		return nil
+	}
+
+	return waitForExecuteCompletion(events, postConfigurationCommandTimeout)
+}
+
+func waitForExecuteCompletion(events <-chan protocol.DecodedPayload, timeout time.Duration) error {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	sawBusyPrompt := false
+	for {
+		select {
+		case <-timer.C:
+			return fmt.Errorf("timeout waiting for command completion after %s", timeout)
+		case payload, ok := <-events:
+			if !ok {
+				return errors.New("dispatcher event subscription closed while waiting for command completion")
+			}
+			if payload.Kind != protocol.KindCommand {
+				continue
+			}
+			switch payload.Command {
+			case "SetPromptType":
+				promptType, ok := promptTypeFromArgs(payload.Args)
+				if !ok {
+					continue
+				}
+				if promptType == 0 {
+					sawBusyPrompt = true
+					continue
+				}
+				if sawBusyPrompt {
+					return nil
+				}
+			case "HadError":
+				code, text := hadErrorFromArgs(payload.Args)
+				if text != "" {
+					return fmt.Errorf("RIDE reported HadError %d: %s", code, text)
+				}
+				return fmt.Errorf("RIDE reported HadError %d", code)
+			}
+		}
+	}
+}
+
+func promptTypeFromArgs(args any) (int, bool) {
+	switch typed := args.(type) {
+	case protocol.SetPromptTypeArgs:
+		return typed.Type, true
+	case map[string]any:
+		return decode.Int(typed["type"])
+	default:
+		return 0, false
+	}
+}
+
+func hadErrorFromArgs(args any) (int, string) {
+	switch typed := args.(type) {
+	case protocol.HadErrorArgs:
+		return typed.Error, typed.ErrorText
+	case map[string]any:
+		code, _ := decode.Int(typed["error"])
+		text := strings.TrimSpace(decode.StringOrEmpty(typed["error_text"]))
+		return code, text
+	default:
+		return 0, ""
+	}
 }
 
 func waitForDone(done <-chan struct{}, timeout time.Duration, component string) error {
@@ -427,16 +528,6 @@ func runtimeLinkExpressionFrom(requestCommand string, arguments any) string {
 	return defaultLinkExpression
 }
 
-func buildPostConfigurationCommands(requestType string, autoLink bool, linkExpr, launchExpr string) []string {
-	commands := make([]string, 0, 2)
-	if requestType == "launch" && autoLink && linkExpr != "" {
-		commands = append(commands, linkExpr)
-	}
-	if launchExpr != "" {
-		commands = append(commands, launchExpr)
-	}
-	return commands
-}
 func readDAPPayload(reader *bufio.Reader) ([]byte, error) {
 	return daptransport.ReadPayload(reader)
 }
