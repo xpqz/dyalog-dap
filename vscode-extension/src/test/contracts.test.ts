@@ -8,6 +8,7 @@ test("resolveDebugConfigurationContract returns default launch config for empty 
   assert.equal(resolved.request, "launch");
   assert.equal(resolved.name, "Dyalog: Launch (RIDE)");
   assert.equal(resolved.rideAddr, "127.0.0.1:4502");
+  assert.equal(resolved.launchExpression, "");
   assert.equal(resolved.adapterPath, "${workspaceFolder}/dap-adapter");
 });
 

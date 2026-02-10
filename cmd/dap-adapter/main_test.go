@@ -329,6 +329,156 @@ func TestRun_LaunchAndControlRoundTripAgainstRide(t *testing.T) {
 	}
 }
 
+func TestRun_LaunchExpressionExecutesAfterConfigurationDone(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+
+	serverErr := make(chan error, 1)
+	preConfigDoneChecked := make(chan struct{})
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+
+		if err := rideHandshake(conn); err != nil {
+			serverErr <- err
+			return
+		}
+
+		_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		if payload, err := rideReadFrame(conn); err == nil {
+			command, decodeErr := rideDecodeCommandName(payload)
+			if decodeErr != nil {
+				serverErr <- decodeErr
+				return
+			}
+			serverErr <- fmt.Errorf("expected no command before configurationDone, got %q", command)
+			return
+		} else {
+			var netErr net.Error
+			if !errors.As(err, &netErr) || !netErr.Timeout() {
+				serverErr <- fmt.Errorf("unexpected pre-configurationDone read error: %w", err)
+				return
+			}
+		}
+		_ = conn.SetReadDeadline(time.Time{})
+		close(preConfigDoneChecked)
+
+		payload, err := rideReadFrame(conn)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		command, err := rideDecodeCommandName(payload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if command != "Execute" {
+			serverErr <- fmt.Errorf("expected Execute after configurationDone, got %q", command)
+			return
+		}
+		text, trace, err := rideDecodeExecute(payload)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if text != "1+1\n" {
+			serverErr <- fmt.Errorf("unexpected Execute text %q", text)
+			return
+		}
+		if trace != 0 {
+			serverErr <- fmt.Errorf("unexpected Execute trace %d", trace)
+			return
+		}
+
+		serverErr <- nil
+	}()
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- run(context.Background(), inR, outW, io.Discard)
+		_ = outW.Close()
+	}()
+
+	decoderErr := make(chan error, 1)
+	msgs := make(chan map[string]any, 128)
+	go func() {
+		defer close(msgs)
+		decoderErr <- decodeDAPStream(outR, msgs)
+	}()
+
+	writeReq := func(seq int, command string, args map[string]any) {
+		t.Helper()
+		req := map[string]any{
+			"seq":     seq,
+			"type":    "request",
+			"command": command,
+		}
+		if args != nil {
+			req["arguments"] = args
+		}
+		if err := writeDAPFrame(inW, req); err != nil {
+			t.Fatalf("write %s failed: %v", command, err)
+		}
+	}
+
+	writeReq(1, "initialize", map[string]any{"adapterID": "dyalog-dap"})
+	if ok, _ := waitForResponse(t, msgs, 1)["success"].(bool); !ok {
+		t.Fatal("initialize response was not successful")
+	}
+	waitForEvent(t, msgs, "initialized")
+
+	writeReq(2, "launch", map[string]any{
+		"rideAddr":           ln.Addr().String(),
+		"rideTranscriptsDir": t.TempDir(),
+		"launchExpression":   "1+1",
+	})
+	if ok, _ := waitForResponse(t, msgs, 2)["success"].(bool); !ok {
+		t.Fatal("launch response was not successful")
+	}
+	select {
+	case <-preConfigDoneChecked:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for pre-configurationDone assertion")
+	}
+
+	writeReq(3, "configurationDone", nil)
+	if ok, _ := waitForResponse(t, msgs, 3)["success"].(bool); !ok {
+		t.Fatal("configurationDone response was not successful")
+	}
+
+	writeReq(4, "disconnect", nil)
+	if ok, _ := waitForResponse(t, msgs, 4)["success"].(bool); !ok {
+		t.Fatal("disconnect response was not successful")
+	}
+	_ = inW.Close()
+
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("run returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for run to stop")
+	}
+	if err := <-decoderErr; err != nil {
+		t.Fatalf("decode stream failed: %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("fake RIDE server assertions failed: %v", err)
+	}
+}
+
 func TestRun_LaunchBeforeInitializeDoesNotStartRideRuntime(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -694,6 +844,23 @@ func rideDecodeLineAttributes(payload string) (int, []int, error) {
 		stop = append(stop, value)
 	}
 	return win, stop, nil
+}
+
+func rideDecodeExecute(payload string) (string, int, error) {
+	var envelope []any
+	if err := json.Unmarshal([]byte(payload), &envelope); err != nil {
+		return "", 0, err
+	}
+	if len(envelope) < 2 {
+		return "", 0, errors.New("missing command args")
+	}
+	args, ok := envelope[1].(map[string]any)
+	if !ok {
+		return "", 0, errors.New("command args are not an object")
+	}
+	text, _ := args["text"].(string)
+	trace, _ := asInt(args["trace"])
+	return text, trace, nil
 }
 
 func asInt(value any) (int, bool) {

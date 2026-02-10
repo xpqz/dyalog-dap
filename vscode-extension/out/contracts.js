@@ -14,6 +14,7 @@ function resolveDebugConfigurationContract(config) {
             name: "Dyalog: Launch (RIDE)",
             request: "launch",
             rideAddr: "127.0.0.1:4502",
+            launchExpression: "",
             adapterPath: "${workspaceFolder}/dap-adapter"
         };
     }
