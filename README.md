@@ -9,7 +9,7 @@ Developer workflows are in [docs/DEVELOP.md](docs/DEVELOP.md).
 
 - VS Code
 - Dyalog APL with RIDE enabled
-- Dyalog DAP extension VSIX from Releases
+- Dyalog DAP VS Code extension
 
 Release page:
 
@@ -17,11 +17,11 @@ Release page:
 
 ## Install in VS Code
 
-1. Download the latest extension file `dyalog-dap-<version>.vsix` from Releases.
-2. Install it:
+1. Download the extension file `dyalog-dap-<version>.vsix` from Releases.
+2. Install the VSIX:
 
 ```bash
-code --install-extension dyalog-dap-0.1.0-beta.2.vsix --force
+code --install-extension dyalog-dap-0.1.0-beta.3.vsix --force
 ```
 
 3. In VS Code, open Command Palette and run:
@@ -29,6 +29,14 @@ code --install-extension dyalog-dap-0.1.0-beta.2.vsix --force
 - `Dyalog DAP: Install/Update Adapter`
 
 This downloads the matching adapter binary for your platform and verifies checksums automatically.
+
+Release assets named `dyalog-dap_<version>_<os>_<arch>.tar.gz` (or `.zip`) are adapter binaries.
+
+Alternative manual adapter configuration:
+
+1. Download `dyalog-dap_<version>_<os>_<arch>.tar.gz` (or `.zip`) from Releases.
+2. Unpack it and locate `dap-adapter` (`dap-adapter.exe` on Windows).
+3. Set `adapterPath` in your debug config to that binary path.
 
 ## Start your Dyalog session
 

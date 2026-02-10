@@ -2,7 +2,7 @@
   "name": "dyalog-dap",
   "displayName": "Dyalog DAP",
   "description": "Minimal VS Code debugger integration for the dyalog-dap adapter.",
-  "version": "0.1.0-beta.2",
+  "version": "0.1.0-beta.3",
   "publisher": "xpqz",
   "repository": {
     "type": "git",
