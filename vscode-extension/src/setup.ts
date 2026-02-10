@@ -10,6 +10,7 @@ export type LaunchConfiguration = {
   type: string;
   request: string;
   rideAddr: string;
+  launchExpression: string;
   adapterPath: string;
 };
 
@@ -19,6 +20,7 @@ export function starterLaunchConfiguration(adapterPath: string): LaunchConfigura
     type: "dyalog-dap",
     request: "launch",
     rideAddr: "127.0.0.1:4502",
+    launchExpression: "",
     adapterPath
   };
 }

@@ -63,7 +63,8 @@ Minimal launch config:
   "name": "Dyalog: Launch (RIDE)",
   "type": "dyalog-dap",
   "request": "launch",
-  "rideAddr": "127.0.0.1:4502"
+  "rideAddr": "127.0.0.1:4502",
+  "launchExpression": "#.MyNs.MyFn 42"
 }
 ```
 
@@ -79,6 +80,21 @@ Attach config (if Dyalog is already running):
 ```
 
 Then press `F5` or start the config from Run and Debug.
+
+The adapter applies breakpoints first, then evaluates `launchExpression` after `configurationDone`.
+Use this to run a function with arguments as the debug entry point.
+
+You can leave `launchExpression` empty if you only want to attach and drive execution manually from Dyalog.
+
+## APL debug console workflow
+
+During a debug session, use the VS Code Debug Console to run APL expressions.
+
+- entered expressions are sent using RIDE `Execute`
+- interpreter output appears in the Debug Console output stream
+- input echo lines from RIDE are suppressed to avoid duplicate console noise
+
+This gives you a simple session-style console inside VS Code while debugging.
 
 ## Commands you will use
 

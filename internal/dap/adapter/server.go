@@ -100,8 +100,8 @@ type SourceResponseBody struct {
 
 // Breakpoint describes one DAP breakpoint result.
 type Breakpoint struct {
-	Verified bool `json:"verified"`
-	Line     int  `json:"line,omitempty"`
+	Verified bool   `json:"verified"`
+	Line     int    `json:"line,omitempty"`
 	Message  string `json:"message,omitempty"`
 }
 
@@ -174,6 +174,7 @@ type Server struct {
 	evaluateWaiters    map[int]chan evaluateResult
 	nextEvaluateToken  int
 	evaluateTimeout    time.Duration
+	replEvaluate       *pendingReplEvaluate
 	frameSymbols       map[int]frameSymbolsState
 	pendingSymbolTips  map[int]pendingSymbolTip
 	nextSymbolTipToken int
@@ -225,9 +226,25 @@ type valueTipArgs struct {
 	token int
 }
 
+type appendSessionOutputArgs struct {
+	result     string
+	outputType int
+	group      int
+}
+
 type evaluateResult struct {
 	text  string
 	class int
+}
+
+type replEvaluateResult struct {
+	text     string
+	canceled bool
+}
+
+type pendingReplEvaluate struct {
+	waiter  chan replEvaluateResult
+	outputs []string
 }
 
 type frameSymbol struct {
@@ -318,6 +335,7 @@ func (s *Server) SetRideController(controller RideCommandSender) {
 	if controller == nil {
 		s.evaluateWaiters = map[int]chan evaluateResult{}
 		s.pendingSymbolTips = map[int]pendingSymbolTip{}
+		s.cancelPendingReplEvaluateLocked()
 	}
 }
 
@@ -559,19 +577,19 @@ func (s *Server) handleSetBreakpointsRequest(req Request) (Response, []Event) {
 		s.mu.Unlock()
 		s.requestWindowLayoutSync()
 		return Response{
-			RequestSeq: req.Seq,
-			Command:    req.Command,
-			Success:    true,
-			Body: SetBreakpointsResponseBody{
-				Breakpoints: buildBreakpointResponses(
-					args.lines,
-					false,
-					"Pending: source not currently mapped; will apply after window/layout update.",
-				),
-			},
-		}, []Event{
-			newOutputEvent("console", fmt.Sprintf("breakpoints pending (%s): %v", breakpointSourceLabel(args), args.lines)),
-		}
+				RequestSeq: req.Seq,
+				Command:    req.Command,
+				Success:    true,
+				Body: SetBreakpointsResponseBody{
+					Breakpoints: buildBreakpointResponses(
+						args.lines,
+						false,
+						"Pending: source not currently mapped; will apply after window/layout update.",
+					),
+				},
+			}, []Event{
+				newOutputEvent("console", fmt.Sprintf("breakpoints pending (%s): %v", breakpointSourceLabel(args), args.lines)),
+			}
 	}
 	s.mu.Unlock()
 
@@ -591,15 +609,15 @@ func (s *Server) handleSetBreakpointsRequest(req Request) (Response, []Event) {
 	s.mu.Unlock()
 
 	return Response{
-		RequestSeq: req.Seq,
-		Command:    req.Command,
-		Success:    true,
-		Body: SetBreakpointsResponseBody{
-			Breakpoints: buildBreakpointResponses(args.lines, true, "Active: mapped to current source window."),
-		},
-	}, []Event{
-		newOutputEvent("console", fmt.Sprintf("breakpoints active (token=%d): %v", token, args.lines)),
-	}
+			RequestSeq: req.Seq,
+			Command:    req.Command,
+			Success:    true,
+			Body: SetBreakpointsResponseBody{
+				Breakpoints: buildBreakpointResponses(args.lines, true, "Active: mapped to current source window."),
+			},
+		}, []Event{
+			newOutputEvent("console", fmt.Sprintf("breakpoints active (token=%d): %v", token, args.lines)),
+		}
 }
 
 func (s *Server) handleScopesRequest(req Request) Response {
@@ -649,10 +667,10 @@ func (s *Server) handleScopesRequest(req Request) Response {
 		Success:    true,
 		Body: ScopesResponseBody{
 			Scopes: []Scope{{
-			Name:               "Locals",
-			VariablesReference: scopeRef,
-			Expensive:          false,
-		}},
+				Name:               "Locals",
+				VariablesReference: scopeRef,
+				Expensive:          false,
+			}},
 		},
 	}
 }
@@ -706,36 +724,69 @@ func (s *Server) handleEvaluateRequest(req Request) Response {
 		return s.failure(req, "interpreter is busy; watch/hover evaluate requires ready prompt")
 	}
 
+	timeout := s.evaluateTimeout
+	if timeout <= 0 {
+		timeout = evaluateTimeout
+	}
+	controller := s.rideController
+
+	if context == "repl" {
+		if s.replEvaluate != nil {
+			s.mu.Unlock()
+			return s.failure(req, "repl evaluate already in progress")
+		}
+
+		waiter := make(chan replEvaluateResult, 1)
+		s.replEvaluate = &pendingReplEvaluate{
+			waiter: waiter,
+		}
+		s.mu.Unlock()
+
+		text := args.expression
+		if !strings.HasSuffix(text, "\n") {
+			text += "\n"
+		}
+		if err := controller.SendCommand("Execute", map[string]any{
+			"text":  text,
+			"trace": 0,
+		}); err != nil {
+			s.mu.Lock()
+			s.clearPendingReplEvaluateLocked()
+			s.mu.Unlock()
+			return s.failure(req, "failed to send Execute")
+		}
+
+		select {
+		case result := <-waiter:
+			if result.canceled {
+				return s.failure(req, "repl evaluate canceled before interpreter returned to prompt")
+			}
+			return s.successWithBody(req, EvaluateResponseBody{
+				Result:             strings.TrimRight(result.text, "\n"),
+				Type:               "string",
+				VariablesReference: 0,
+			})
+		case <-time.After(timeout):
+			s.mu.Lock()
+			s.clearPendingReplEvaluateLocked()
+			s.mu.Unlock()
+			return s.failure(req, evaluateTimeoutMessage(context))
+		}
+	}
+
 	win := args.frameID
 	if win <= 0 && s.activeTracerSet {
 		win = s.activeTracerWindow
 	}
-	if win <= 0 && context != "repl" {
-		s.mu.Unlock()
-		return s.failure(req, "watch/hover evaluate requires frameId or active tracer window")
-	}
-	if context == "repl" && s.promptTypeSeen && s.promptType == 0 {
-		if result, ok := s.cachedEvaluateResult(win, args.expression); ok {
-			s.mu.Unlock()
-			return s.successWithBody(req, evaluateResultToBody(result))
-		}
-		s.mu.Unlock()
-		return s.failure(req, "interpreter is busy; repl evaluate fallback requires cached symbol value")
-	}
 	if win <= 0 {
 		s.mu.Unlock()
-		return s.failure(req, "repl evaluate requires frameId, active tracer window, or cached symbol value")
+		return s.failure(req, "watch/hover evaluate requires frameId or active tracer window")
 	}
 
 	token := s.nextEvaluateToken
 	s.nextEvaluateToken++
 	waiter := make(chan evaluateResult, 1)
 	s.evaluateWaiters[token] = waiter
-	controller := s.rideController
-	timeout := s.evaluateTimeout
-	if timeout <= 0 {
-		timeout = evaluateTimeout
-	}
 	s.mu.Unlock()
 
 	if err := controller.SendCommand("GetValueTip", map[string]any{
@@ -748,11 +799,7 @@ func (s *Server) handleEvaluateRequest(req Request) Response {
 	}); err != nil {
 		s.mu.Lock()
 		delete(s.evaluateWaiters, token)
-		result, hasCached := s.cachedEvaluateResult(win, args.expression)
 		s.mu.Unlock()
-		if context == "repl" && hasCached {
-			return s.successWithBody(req, evaluateResultToBody(result))
-		}
 		return s.failure(req, "failed to send GetValueTip")
 	}
 
@@ -762,11 +809,7 @@ func (s *Server) handleEvaluateRequest(req Request) Response {
 	case <-time.After(timeout):
 		s.mu.Lock()
 		delete(s.evaluateWaiters, token)
-		cached, hasCached := s.cachedEvaluateResult(win, args.expression)
 		s.mu.Unlock()
-		if context == "repl" && hasCached {
-			return s.successWithBody(req, evaluateResultToBody(cached))
-		}
 		return s.failure(req, evaluateTimeoutMessage(context))
 	}
 }
@@ -798,32 +841,10 @@ func evaluateTimeoutMessage(context string) string {
 	case "hover":
 		return "timed out waiting for ValueTip in hover context; ensure interpreter is paused and symbol is in scope"
 	case "repl":
-		return "timed out waiting for ValueTip in repl context; retry with frameId or evaluate a cached symbol"
+		return "timed out waiting for Execute completion in repl context; ensure interpreter returns to prompt"
 	default:
 		return "timed out waiting for ValueTip"
 	}
-}
-
-func (s *Server) cachedEvaluateResult(frameID int, expression string) (evaluateResult, bool) {
-	name := strings.TrimSpace(expression)
-	if !isSymbolName(name) {
-		return evaluateResult{}, false
-	}
-	if frameID <= 0 {
-		return evaluateResult{}, false
-	}
-	state, ok := s.frameSymbols[frameID]
-	if !ok {
-		return evaluateResult{}, false
-	}
-	symbol, ok := state.symbols[name]
-	if !ok || !symbol.hasValue {
-		return evaluateResult{}, false
-	}
-	return evaluateResult{
-		text:  symbol.value,
-		class: symbol.class,
-	}, true
 }
 
 func (s *Server) handleSourceRequest(req Request) Response {
@@ -988,7 +1009,24 @@ func (s *Server) HandleRidePayload(decoded protocol.DecodedPayload) []Event {
 		}
 		s.promptType = promptType
 		s.promptTypeSeen = true
+		if promptType > 0 {
+			s.completePendingReplEvaluateLocked(false)
+		}
 		return nil
+
+	case "AppendSessionOutput":
+		appendOutput, ok := extractAppendSessionOutput(decoded.Args)
+		if !ok {
+			return nil
+		}
+		if appendOutput.result == "" {
+			return nil
+		}
+		if appendOutput.outputType == 14 {
+			return nil
+		}
+		s.appendPendingReplOutputLocked(appendOutput)
+		return []Event{newOutputEvent(outputCategoryForSessionOutput(appendOutput.outputType), appendOutput.result)}
 
 	case "ValueTip":
 		valueTip, ok := extractValueTip(decoded.Args)
@@ -1265,6 +1303,7 @@ func (s *Server) terminateSessionFromRide() {
 	s.promptTypeSeen = false
 	s.evaluateWaiters = map[int]chan evaluateResult{}
 	s.pendingSymbolTips = map[int]pendingSymbolTip{}
+	s.cancelPendingReplEvaluateLocked()
 }
 
 func (s *Server) resetRuntimeStateForReconnect() {
@@ -1286,6 +1325,37 @@ func (s *Server) resetRuntimeStateForReconnect() {
 	s.pendingSymbolTips = map[int]pendingSymbolTip{}
 	s.nextSymbolTipToken = 100000
 	s.promptTypeSeen = false
+	s.clearPendingReplEvaluateLocked()
+}
+
+func (s *Server) appendPendingReplOutputLocked(output appendSessionOutputArgs) {
+	if s.replEvaluate == nil {
+		return
+	}
+	s.replEvaluate.outputs = append(s.replEvaluate.outputs, output.result)
+}
+
+func (s *Server) completePendingReplEvaluateLocked(canceled bool) {
+	if s.replEvaluate == nil {
+		return
+	}
+	pending := s.replEvaluate
+	s.replEvaluate = nil
+	select {
+	case pending.waiter <- replEvaluateResult{
+		text:     strings.Join(pending.outputs, ""),
+		canceled: canceled,
+	}:
+	default:
+	}
+}
+
+func (s *Server) clearPendingReplEvaluateLocked() {
+	s.replEvaluate = nil
+}
+
+func (s *Server) cancelPendingReplEvaluateLocked() {
+	s.completePendingReplEvaluateLocked(true)
 }
 
 func newOutputEvent(category, output string) Event {
@@ -2051,6 +2121,25 @@ func extractSetPromptType(args any) (int, bool) {
 	}
 }
 
+func extractAppendSessionOutput(args any) (appendSessionOutputArgs, bool) {
+	switch v := args.(type) {
+	case protocol.AppendSessionOutputArgs:
+		return appendSessionOutputArgs{
+			result:     v.Result,
+			outputType: v.Type,
+			group:      v.Group,
+		}, true
+	case map[string]any:
+		return appendSessionOutputArgs{
+			result:     stringFromAny(v["result"]),
+			outputType: intFromAny(v["type"]),
+			group:      intFromAny(v["group"]),
+		}, true
+	default:
+		return appendSessionOutputArgs{}, false
+	}
+}
+
 func extractValueTip(args any) (valueTipArgs, bool) {
 	v, ok := args.(map[string]any)
 	if !ok {
@@ -2096,6 +2185,17 @@ func (s *Server) dispatchValueTip(valueTip valueTipArgs) {
 	symbol.hasValue = true
 	state.symbols[pending.name] = symbol
 	s.frameSymbols[pending.frameID] = state
+}
+
+func outputCategoryForSessionOutput(outputType int) string {
+	switch outputType {
+	case 3, 5:
+		return "stderr"
+	case 11:
+		return "console"
+	default:
+		return "stdout"
+	}
 }
 
 func (s *Server) ensureScopeForFrame(frameID int) (int, bool) {

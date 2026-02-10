@@ -1622,52 +1622,118 @@ func TestHandleRequest_EvaluateHoverUsesValueTip(t *testing.T) {
 	}
 }
 
-func TestHandleRequest_EvaluateReplFallsBackToCachedSymbolValue(t *testing.T) {
+func TestHandleRequest_EvaluateReplExecutesAndReturnsSessionOutput(t *testing.T) {
 	server := NewServer()
 	enterRunningState(t, server)
-	ride := &mockRideController{
-		sendErrByCommand: map[string]error{
-			"GetValueTip": errors.New("offline"),
-		},
+
+	ride := &mockRideController{}
+	ride.onSend = func(command string, args map[string]any) {
+		if command != "Execute" {
+			return
+		}
+		server.HandleRidePayload(protocol.DecodedPayload{
+			Kind:    protocol.KindCommand,
+			Command: "AppendSessionOutput",
+			Args: protocol.AppendSessionOutputArgs{
+				Result: "      1+1\n",
+				Type:   14,
+				Group:  0,
+			},
+		})
+		server.HandleRidePayload(protocol.DecodedPayload{
+			Kind:    protocol.KindCommand,
+			Command: "SetPromptType",
+			Args: protocol.SetPromptTypeArgs{
+				Type: 0,
+			},
+		})
+		server.HandleRidePayload(protocol.DecodedPayload{
+			Kind:    protocol.KindCommand,
+			Command: "AppendSessionOutput",
+			Args: protocol.AppendSessionOutputArgs{
+				Result: "2\n",
+				Type:   3,
+				Group:  0,
+			},
+		})
+		server.HandleRidePayload(protocol.DecodedPayload{
+			Kind:    protocol.KindCommand,
+			Command: "SetPromptType",
+			Args: protocol.SetPromptTypeArgs{
+				Type: 1,
+			},
+		})
 	}
 	server.SetRideController(ride)
-
-	server.mu.Lock()
-	server.activeTracerSet = true
-	server.activeTracerWindow = 900
-	server.tracerWindows[900] = tracerWindowState{threadID: 1}
-	server.frameSymbols[900] = frameSymbolsState{
-		order: []string{"foo"},
-		symbols: map[string]frameSymbol{
-			"foo": {
-				name:     "foo",
-				isLocal:  true,
-				value:    "42",
-				class:    2,
-				hasValue: true,
-			},
-		},
-	}
-	server.mu.Unlock()
 
 	resp, _ := server.HandleRequest(Request{
 		Seq:     83,
 		Command: "evaluate",
 		Arguments: map[string]any{
-			"expression": "foo",
+			"expression": "1+1",
 			"context":    "repl",
-			"frameId":    900,
 		},
 	})
 	if !resp.Success {
-		t.Fatalf("expected repl evaluate fallback success, got %s", resp.Message)
+		t.Fatalf("expected repl evaluate success, got %s", resp.Message)
 	}
+	if len(ride.calls) != 1 || ride.calls[0].command != "Execute" {
+		t.Fatalf("expected one Execute command, got %#v", ride.calls)
+	}
+	if got := ride.calls[0].args["text"]; got != "1+1\n" {
+		t.Fatalf("expected Execute text=1+1\\n, got %#v", got)
+	}
+	if got := ride.calls[0].args["trace"]; got != 0 {
+		t.Fatalf("expected Execute trace=0, got %#v", got)
+	}
+
 	body := resp.Body.(EvaluateResponseBody)
-	if body.Result != "42" || body.Type != "nameclass(2)" {
-		t.Fatalf("unexpected repl fallback body: %#v", body)
+	if body.Result != "2" {
+		t.Fatalf("unexpected repl result: %#v", body)
 	}
-	if len(ride.calls) != 1 || ride.calls[0].command != "GetValueTip" {
-		t.Fatalf("expected repl to attempt GetValueTip before fallback, got %#v", ride.calls)
+	if body.Type != "string" {
+		t.Fatalf("expected string result type, got %#v", body)
+	}
+}
+
+func TestHandleRidePayload_AppendSessionOutputEmitsOutputEventAndSkipsEcho(t *testing.T) {
+	server := NewServer()
+	enterRunningState(t, server)
+
+	events := server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "AppendSessionOutput",
+		Args: protocol.AppendSessionOutputArgs{
+			Result: "      1+1\n",
+			Type:   14,
+			Group:  0,
+		},
+	})
+	if len(events) != 0 {
+		t.Fatalf("expected echoed input (type=14) to be suppressed, got %#v", events)
+	}
+
+	events = server.HandleRidePayload(protocol.DecodedPayload{
+		Kind:    protocol.KindCommand,
+		Command: "AppendSessionOutput",
+		Args: protocol.AppendSessionOutputArgs{
+			Result: "2\n",
+			Type:   3,
+			Group:  0,
+		},
+	})
+	if len(events) != 1 || events[0].Event != "output" {
+		t.Fatalf("expected one output event, got %#v", events)
+	}
+	body, ok := events[0].Body.(OutputEventBody)
+	if !ok {
+		t.Fatalf("expected OutputEventBody, got %T", events[0].Body)
+	}
+	if body.Category != "stderr" {
+		t.Fatalf("expected stderr output category, got %#v", body)
+	}
+	if body.Output != "2\n" {
+		t.Fatalf("unexpected output text: %#v", body)
 	}
 }
 

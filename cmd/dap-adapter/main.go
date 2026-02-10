@@ -80,6 +80,17 @@ func run(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Write
 			Command:   request.Command,
 			Arguments: request.Arguments,
 		})
+		if request.Command == "configurationDone" && response.Success {
+			if err := runtime.executeConfiguredLaunchExpression(); err != nil {
+				response = adapter.Response{
+					RequestSeq: request.Seq,
+					Command:    request.Command,
+					Success:    false,
+					Message:    err.Error(),
+				}
+				events = nil
+			}
+		}
 		if err := writer.writeResponse(response); err != nil {
 			return err
 		}
@@ -174,6 +185,8 @@ type rideRuntime struct {
 	writer      *dapWriter
 	harness     *harness.Harness
 	dispatcher  *sessionstate.Dispatcher
+	launchExpr  string
+	launchRan   bool
 	unsubscribe func()
 	cancel      context.CancelFunc
 	runDone     chan struct{}
@@ -205,6 +218,7 @@ func (r *rideRuntime) start(ctx context.Context, requestCommand string, args any
 	if err != nil {
 		return err
 	}
+	launchExpr := runtimeLaunchExpressionFrom(args)
 
 	h := harness.New(cfg)
 	client, err := h.Start(ctx, "dap-adapter")
@@ -242,6 +256,8 @@ func (r *rideRuntime) start(ctx context.Context, requestCommand string, args any
 	r.mu.Lock()
 	r.harness = h
 	r.dispatcher = dispatcher
+	r.launchExpr = launchExpr
+	r.launchRan = false
 	r.unsubscribe = unsubscribe
 	r.cancel = cancel
 	r.runDone = runDone
@@ -266,6 +282,8 @@ func (r *rideRuntime) stop() error {
 
 	r.harness = nil
 	r.dispatcher = nil
+	r.launchExpr = ""
+	r.launchRan = false
 	r.unsubscribe = nil
 	r.cancel = nil
 	r.runDone = nil
@@ -295,6 +313,38 @@ func (r *rideRuntime) stop() error {
 
 	if len(errs) > 0 {
 		return errors.Join(errs...)
+	}
+	return nil
+}
+
+func (r *rideRuntime) executeConfiguredLaunchExpression() error {
+	r.mu.Lock()
+	dispatcher := r.dispatcher
+	expr := strings.TrimSpace(r.launchExpr)
+	alreadyRan := r.launchRan
+	if dispatcher == nil {
+		r.mu.Unlock()
+		return errors.New("RIDE runtime is not active")
+	}
+	if alreadyRan || expr == "" {
+		r.mu.Unlock()
+		return nil
+	}
+	r.launchRan = true
+	r.mu.Unlock()
+
+	text := expr
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	if err := dispatcher.SendCommand("Execute", map[string]any{
+		"text":  text,
+		"trace": 0,
+	}); err != nil {
+		r.mu.Lock()
+		r.launchRan = false
+		r.mu.Unlock()
+		return fmt.Errorf("failed to execute launchExpression: %w", err)
 	}
 	return nil
 }
@@ -374,6 +424,15 @@ func runtimeConfigFrom(requestCommand string, arguments any) (harness.Config, er
 		return cfg, errors.New("launch/attach requires rideAddr (or DYALOG_RIDE_ADDR)")
 	}
 	return cfg, nil
+}
+
+func runtimeLaunchExpressionFrom(arguments any) string {
+	argsMap, ok := arguments.(map[string]any)
+	if !ok {
+		return ""
+	}
+	text, _ := getString(argsMap, "launchExpression")
+	return text
 }
 
 func getString(values map[string]any, key string) (string, bool) {
