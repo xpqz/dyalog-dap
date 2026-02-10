@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/stefan/lsp-dap/internal/ride/protocol"
+	"github.com/stefan/lsp-dap/internal/support/decode"
 )
 
 // Request is a minimal DAP request envelope used by the bootstrap server skeleton.
@@ -2470,89 +2471,19 @@ func oneBased(value int) int {
 }
 
 func intFromAny(v any) int {
-	switch n := v.(type) {
-	case int:
-		return n
-	case int8:
-		return int(n)
-	case int16:
-		return int(n)
-	case int32:
-		return int(n)
-	case int64:
-		return int(n)
-	case uint:
-		return int(n)
-	case uint8:
-		return int(n)
-	case uint16:
-		return int(n)
-	case uint32:
-		return int(n)
-	case uint64:
-		return int(n)
-	case float32:
-		return int(n)
-	case float64:
-		return int(n)
-	default:
-		return 0
-	}
+	return decode.IntOrZero(v)
 }
 
 func boolFromAny(v any) bool {
-	switch b := v.(type) {
-	case bool:
-		return b
-	case int:
-		return b == 1
-	case int8:
-		return b == 1
-	case int16:
-		return b == 1
-	case int32:
-		return b == 1
-	case int64:
-		return b == 1
-	case uint:
-		return b == 1
-	case uint8:
-		return b == 1
-	case uint16:
-		return b == 1
-	case uint32:
-		return b == 1
-	case uint64:
-		return b == 1
-	case float32:
-		return b == 1
-	case float64:
-		return b == 1
-	default:
-		return false
-	}
+	return decode.BoolOrFalse(v)
 }
 
 func stringFromAny(v any) string {
-	s, _ := v.(string)
-	return s
+	return decode.StringOrEmpty(v)
 }
 
 func stringSliceFromAny(v any) []string {
-	switch typed := v.(type) {
-	case []string:
-		return append([]string{}, typed...)
-	case []any:
-		values := make([]string, 0, len(typed))
-		for _, item := range typed {
-			if text, ok := item.(string); ok {
-				values = append(values, text)
-			}
-		}
-		return values
-	default:
-		return nil
-	}
+	return decode.StringSlice(v)
 }
 
 func (s *Server) success(req Request) Response {

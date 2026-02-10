@@ -17,6 +17,7 @@ import (
 	"github.com/stefan/lsp-dap/internal/integration/harness"
 	"github.com/stefan/lsp-dap/internal/ride/protocol"
 	"github.com/stefan/lsp-dap/internal/ride/sessionstate"
+	"github.com/stefan/lsp-dap/internal/support/decode"
 )
 
 const runtimeStopWaitTimeout = 3 * time.Second
@@ -376,34 +377,34 @@ func runtimeConfigFrom(requestCommand string, arguments any) (harness.Config, er
 		return cfg, nil
 	}
 
-	if rideAddr, ok := getString(argsMap, "rideAddr"); ok {
+	if rideAddr, ok := decode.NonEmptyTrimmedStringFromMap(argsMap, "rideAddr"); ok {
 		cfg.RideAddr = rideAddr
 	}
-	if rideAddr, ok := getString(argsMap, "address"); ok && cfg.RideAddr == "" {
+	if rideAddr, ok := decode.NonEmptyTrimmedStringFromMap(argsMap, "address"); ok && cfg.RideAddr == "" {
 		cfg.RideAddr = rideAddr
 	}
-	if launchCommand, ok := getString(argsMap, "rideLaunchCommand"); ok {
+	if launchCommand, ok := decode.NonEmptyTrimmedStringFromMap(argsMap, "rideLaunchCommand"); ok {
 		cfg.LaunchCommand = launchCommand
 		explicitLaunchSetting = true
 	}
-	if launchCommand, ok := getString(argsMap, "rideLaunch"); ok && cfg.LaunchCommand == "" {
+	if launchCommand, ok := decode.NonEmptyTrimmedStringFromMap(argsMap, "rideLaunch"); ok && cfg.LaunchCommand == "" {
 		cfg.LaunchCommand = launchCommand
 		explicitLaunchSetting = true
 	}
-	if transcriptsDir, ok := getString(argsMap, "rideTranscriptsDir"); ok {
+	if transcriptsDir, ok := decode.NonEmptyTrimmedStringFromMap(argsMap, "rideTranscriptsDir"); ok {
 		cfg.TranscriptDir = transcriptsDir
 	}
-	if timeoutText, ok := getString(argsMap, "rideConnectTimeout"); ok {
+	if timeoutText, ok := decode.NonEmptyTrimmedStringFromMap(argsMap, "rideConnectTimeout"); ok {
 		timeout, err := time.ParseDuration(timeoutText)
 		if err != nil {
 			return cfg, fmt.Errorf("invalid rideConnectTimeout %q: %w", timeoutText, err)
 		}
 		cfg.ConnectTimeout = timeout
 	}
-	if timeoutMs, ok := getInt(argsMap, "rideConnectTimeoutMs"); ok && timeoutMs > 0 {
+	if timeoutMs, ok := decode.IntFromMapTextOrNumber(argsMap, "rideConnectTimeoutMs"); ok && timeoutMs > 0 {
 		cfg.ConnectTimeout = time.Duration(timeoutMs) * time.Millisecond
 	}
-	if dyalogBin, ok := getString(argsMap, "dyalogBin"); ok && cfg.LaunchCommand == "" && cfg.RideAddr != "" {
+	if dyalogBin, ok := decode.NonEmptyTrimmedStringFromMap(argsMap, "dyalogBin"); ok && cfg.LaunchCommand == "" && cfg.RideAddr != "" {
 		command, err := harness.DyalogServeLaunchCommand(cfg.RideAddr, dyalogBin)
 		if err != nil {
 			return cfg, err
@@ -431,49 +432,9 @@ func runtimeLaunchExpressionFrom(arguments any) string {
 	if !ok {
 		return ""
 	}
-	text, _ := getString(argsMap, "launchExpression")
+	text, _ := decode.NonEmptyTrimmedStringFromMap(argsMap, "launchExpression")
 	return text
 }
-
-func getString(values map[string]any, key string) (string, bool) {
-	raw, ok := values[key]
-	if !ok {
-		return "", false
-	}
-	text, ok := raw.(string)
-	if !ok {
-		return "", false
-	}
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
-		return "", false
-	}
-	return trimmed, true
-}
-
-func getInt(values map[string]any, key string) (int, bool) {
-	raw, ok := values[key]
-	if !ok {
-		return 0, false
-	}
-	switch typed := raw.(type) {
-	case int:
-		return typed, true
-	case int64:
-		return int(typed), true
-	case float64:
-		return int(typed), true
-	case string:
-		parsed, err := strconv.Atoi(typed)
-		if err != nil {
-			return 0, false
-		}
-		return parsed, true
-	default:
-		return 0, false
-	}
-}
-
 func readDAPPayload(reader *bufio.Reader) ([]byte, error) {
 	headers := map[string]string{}
 	for {

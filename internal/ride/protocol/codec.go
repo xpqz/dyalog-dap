@@ -1,6 +1,10 @@
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/stefan/lsp-dap/internal/support/decode"
+)
 
 // PayloadKind indicates how a payload was interpreted.
 type PayloadKind int
@@ -541,183 +545,26 @@ func decodeSetSessionLineGroupArgs(args map[string]any) any {
 }
 
 func getString(args map[string]any, key string) string {
-	v, ok := args[key]
-	if !ok {
-		return ""
-	}
-	s, ok := v.(string)
-	if !ok {
-		return ""
-	}
-	return s
+	return decode.StringOrEmptyFromMap(args, key)
 }
 
 func getInt(args map[string]any, key string) int {
-	v, ok := args[key]
-	if !ok {
-		return 0
-	}
-	n, ok := toInt(v)
-	if !ok {
-		return 0
-	}
-	return n
-}
-
-func toInt(v any) (int, bool) {
-	switch x := v.(type) {
-	case int:
-		return x, true
-	case int8:
-		return int(x), true
-	case int16:
-		return int(x), true
-	case int32:
-		return int(x), true
-	case int64:
-		return int(x), true
-	case uint:
-		return int(x), true
-	case uint8:
-		return int(x), true
-	case uint16:
-		return int(x), true
-	case uint32:
-		return int(x), true
-	case uint64:
-		return int(x), true
-	case float32:
-		return int(x), true
-	case float64:
-		return int(x), true
-	default:
-		return 0, false
-	}
+	return decode.IntOrZeroFromMap(args, key)
 }
 
 func getStringSlice(args map[string]any, key string) []string {
-	items := getSlice(args, key)
-	result := make([]string, 0, len(items))
-	for _, item := range items {
-		if s, ok := item.(string); ok {
-			result = append(result, s)
-		}
-	}
-	return result
+	return decode.StringSliceFromMap(args, key)
 }
 
 func getIntSlice(args map[string]any, key string) []int {
-	items := getSlice(args, key)
-	result := make([]int, 0, len(items))
-	for _, item := range items {
-		if n, ok := toInt(item); ok {
-			result = append(result, n)
-		}
-	}
-	return result
+	return decode.IntSliceFromMap(args, key)
 }
 
 func getSlice(args map[string]any, key string) []any {
-	v, ok := args[key]
-	if !ok {
-		return nil
-	}
-	items, ok := v.([]any)
-	if !ok {
-		return nil
-	}
-	return items
+	return decode.SliceFromMap(args, key)
 }
 
 // NormalizeBool normalizes protocol bool-like values (bool or numeric 0/1).
 func NormalizeBool(v any) (bool, bool) {
-	switch x := v.(type) {
-	case bool:
-		return x, true
-	case int:
-		if x == 0 {
-			return false, true
-		}
-		if x == 1 {
-			return true, true
-		}
-	case int8:
-		if x == 0 {
-			return false, true
-		}
-		if x == 1 {
-			return true, true
-		}
-	case int16:
-		if x == 0 {
-			return false, true
-		}
-		if x == 1 {
-			return true, true
-		}
-	case int32:
-		if x == 0 {
-			return false, true
-		}
-		if x == 1 {
-			return true, true
-		}
-	case int64:
-		if x == 0 {
-			return false, true
-		}
-		if x == 1 {
-			return true, true
-		}
-	case uint:
-		if x == 0 {
-			return false, true
-		}
-		if x == 1 {
-			return true, true
-		}
-	case uint8:
-		if x == 0 {
-			return false, true
-		}
-		if x == 1 {
-			return true, true
-		}
-	case uint16:
-		if x == 0 {
-			return false, true
-		}
-		if x == 1 {
-			return true, true
-		}
-	case uint32:
-		if x == 0 {
-			return false, true
-		}
-		if x == 1 {
-			return true, true
-		}
-	case uint64:
-		if x == 0 {
-			return false, true
-		}
-		if x == 1 {
-			return true, true
-		}
-	case float32:
-		if x == 0 {
-			return false, true
-		}
-		if x == 1 {
-			return true, true
-		}
-	case float64:
-		if x == 0 {
-			return false, true
-		}
-		if x == 1 {
-			return true, true
-		}
-	}
-	return false, false
+	return decode.Bool(v)
 }
